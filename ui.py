@@ -1,6 +1,5 @@
-import os, sys, math, re, traceback, json, socket, subprocess
+import os, sys, math, re, traceback, json, socket, subprocess, threading, urllib.error, urllib.request
 
-import requests
 import webbrowser
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
@@ -27,6 +26,15 @@ from solution_window import SolutionWindow
 from state_store import load_state, save_state
 
 NL = chr(10)
+
+
+def http_get_json(url: str, timeout: float = 0.2) -> Optional[dict]:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError):
+        return None
+
 
 def parse_float(s: str, default: float = 0.0) -> float:
     try:
@@ -96,6 +104,11 @@ class MainWindow(QMainWindow):
         self.weapon = Weapon()
         self.tables = TableManager()
         self.guns: List[GunInputs] = []
+        self._net_lock = threading.Lock()
+        self._web_poll_busy = False
+        self._status_ping_busy = False
+        self._pending_web_payload = None
+        self._pending_server_online = None
 
         self.sol_win = SolutionWindow(self)
 
@@ -203,12 +216,12 @@ class MainWindow(QMainWindow):
         # timer: poll clicks + status
         self._web_last_ts = 0.0
         self._web_timer = QTimer(self)
-        self._web_timer.setInterval(200)
+        self._web_timer.setInterval(250)
         self._web_timer.timeout.connect(self._web_poll)
         self._web_timer.start()
 
         self._status_timer = QTimer(self)
-        self._status_timer.setInterval(800)
+        self._status_timer.setInterval(1200)
         self._status_timer.timeout.connect(self._server_update_status)
         self._status_timer.start()
 
@@ -337,8 +350,8 @@ class MainWindow(QMainWindow):
         if not base.endswith("/"):
             base += "/"
         try:
-            data = requests.get(base + "api/ping", timeout=0.35).json()
-            return bool(data.get("ok"))
+            data = http_get_json(base + "api/ping", timeout=0.2)
+            return bool(data and data.get("ok"))
         except Exception:
             return False
 
@@ -379,7 +392,25 @@ class MainWindow(QMainWindow):
         self._server_update_status()
 
     def _server_update_status(self):
-        online = self._server_ping()
+        if self._pending_server_online is not None:
+            online = self._pending_server_online
+            self._pending_server_online = None
+            self._apply_server_status_ui(online)
+
+        if self._status_ping_busy:
+            return
+
+        self._status_ping_busy = True
+
+        def ping_worker():
+            online = self._server_ping()
+            with self._net_lock:
+                self._pending_server_online = online
+            self._status_ping_busy = False
+
+        threading.Thread(target=ping_worker, daemon=True).start()
+
+    def _apply_server_status_ui(self, online: bool):
         if hasattr(self, "lbl_server_status"):
             self.lbl_server_status.setText("online" if online else "offline")
             self.lbl_server_status.setStyleSheet(
@@ -405,15 +436,42 @@ class MainWindow(QMainWindow):
         self._server_start_clicked()
 
     def _web_poll(self):
-        # Read clicks from web-map and auto-fill coordinates
+        # Consume payload prepared by background worker (if any)
+        with self._net_lock:
+            pending = self._pending_web_payload
+            self._pending_web_payload = None
+        if pending is not None:
+            self._web_process_payload(pending)
+
+        # Start next non-blocking fetch (if previous finished)
+        if self._web_poll_busy:
+            return
+        self._web_poll_busy = True
+        base = self.web_url.text().strip() if hasattr(self, "web_url") else ""
+
+        def worker():
+            payload = None
+            req_base = base
+            if req_base:
+                if not req_base.endswith("/"):
+                    req_base += "/"
+                try:
+                    payload = http_get_json(req_base + "api/last_click", timeout=0.2)
+                    if payload is None:
+                        payload = {"offline": True}
+                except Exception:
+                    payload = {"offline": True}
+            with self._net_lock:
+                self._pending_web_payload = payload
+            self._web_poll_busy = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _web_process_payload(self, r):
         base = self.web_url.text().strip() if hasattr(self, "web_url") else ""
         if not base:
             return
-        if not base.endswith("/"):
-            base += "/"
-        try:
-            r = requests.get(base + "api/last_click", timeout=0.25).json()
-        except Exception:
+        if r and r.get("offline"):
             # offline
             if hasattr(self, "lbl_server_status"):
                 self.lbl_server_status.setText("offline")
