@@ -300,9 +300,15 @@ class MainWindow(QMainWindow):
     # --- Minimal fallbacks ---
 
     def load_tables(self, show_popup: bool = False):
-        """Best-effort table loading hook (kept for backward compatibility)."""
-        if show_popup:
-            QMessageBox.information(self, "Таблицы", "Загрузка таблиц выполнена.")
+        """Load ballistic tables from local ./tables folder when available."""
+        tables_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tables")
+        try:
+            self.tables.load_folder(tables_dir)
+            if show_popup:
+                QMessageBox.information(self, "Таблицы", "Баллистические таблицы загружены.")
+        except Exception as e:
+            if show_popup:
+                QMessageBox.warning(self, "Таблицы", f"Таблицы не загружены: {e}")
 
     def _restore_state(self):
         """Restore persisted UI state if available."""
@@ -328,9 +334,63 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _parse_coord_field(self, w: QLineEdit, field_name: str) -> float:
+        text = (w.text() or "").strip()
+        if not text:
+            raise ValueError(f"Поле '{field_name}' пустое.")
+        try:
+            return parse_coord_with_autoscale(text)
+        except Exception:
+            try:
+                return float(text.replace(",", "."))
+            except Exception as e:
+                raise ValueError(f"Поле '{field_name}' заполнено неверно: {text}") from e
+
     def compute_selected(self):
         self._save_state()
-        self.status.setText("Расчёт недоступен: восстановлена базовая UI-совместимость.")
+        try:
+            gun = Point2D(self._parse_coord_field(self.ox, "Орудие X"), self._parse_coord_field(self.oy, "Орудие Y"))
+            target = Point2D(self._parse_coord_field(self.tx, "Цель X"), self._parse_coord_field(self.ty, "Цель Y"))
+
+            dist = distance_2d(gun, target)
+            bearing = bearing_rad_from_north(gun, target)
+            az_mil = rad_to_mil(bearing)
+            az_deg = mil_to_deg(az_mil)
+
+            wind_speed = parse_float(self.wind_speed.text(), 0.0)
+            if self.wind_unit.currentText() == "км/ч":
+                wind_speed /= 3.6
+            wind_dir = parse_float(self.wind_dir.text(), 0.0)
+            wx, wy = wind_components_from_speed_dir(wind_speed, wind_dir)
+            wind_ff = rotate_world_to_fireframe(wx, wy, bearing)
+
+            req = SolveRequest(
+                target_x_m=float(dist),
+                target_y_m=0.0,
+                target_z_m=0.0,
+                wind_ff=wind_ff,
+                arc="LOW" if self.arc.currentText() == "НИЗКАЯ" else "HIGH",
+                direct_fire=(self.mode.currentText() == "Прямой"),
+                tolerance_m=8.0,
+                dt=0.02,
+            )
+            best = suggest_best(req, self.weapon, self.tables)
+            if best is None:
+                raise RuntimeError("Не удалось подобрать решение для выбранного режима.")
+
+            summary = (
+                f"Дист: {dist:.0f} м | Азимут: {az_mil:.1f} mil ({az_deg:.1f}°){NL}"
+                f"Заряд: {best.charge} | УВН: {best.elev_mil:.1f} mil | TOF: {best.tof:.1f} c{NL}"
+                f"Промах(оценка): {best.miss_total_m:.1f} м"
+            )
+            self.status.setText(f"Готово: {self.mode.currentText()} / {self.arc.currentText()}")
+            self.out.setText(summary.replace(NL, " | "))
+            self.sol_win.set_text(summary)
+            self.sol_win.show()
+            self.progress.setValue(100)
+        except Exception as e:
+            self.status.setText(f"Ошибка расчёта: {e}")
+            self.progress.setValue(0)
 
     def apply_corr_and_compute(self):
         self.compute_selected()
@@ -364,7 +424,7 @@ class MainWindow(QMainWindow):
             self._server_update_status()
             return
 
-        cmd = [sys.executable, "-m", "uvicorn", "map_server.app:app", "--host", "0.0.0.0", "--port", "8000"]
+        cmd = [sys.executable, "-m", "map_server.standalone_server", "--host", "0.0.0.0", "--port", "8000"]
         try:
             self._server_process = subprocess.Popen(
                 cmd,
