@@ -32,7 +32,7 @@
 </div>
 <script>
 const $=id=>document.getElementById(id);
-const st={img:null,w:0,h:0,p0:null,p1:null,p2:null,calOk:false,markers:new Map(),nfa:[]};
+const st={img:null,w:0,h:0,p0:null,p1:null,p2:null,calOk:false,markers:new Map(),nfa:[],knownPoints:{}};
 const colors={target:'#ff5555',observer:'#88ccff',drone:'#f5d742',gun1:'#55ff99',gun2:'#55ff99',gun3:'#55ff99',gun4:'#55ff99',gun5:'#55ff99'};
 async function post(url,obj){try{await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(obj)});}catch(e){}}
 async function getJson(url){try{return await (await fetch(url)).json();}catch(e){return null;}}
@@ -43,6 +43,14 @@ function draw(){
   for (const [k,m] of st.markers){const g=document.createElementNS('http://www.w3.org/2000/svg','g');
     const c=document.createElementNS('http://www.w3.org/2000/svg','circle'); c.setAttribute('cx',m.x); c.setAttribute('cy',m.y); c.setAttribute('r',8); c.setAttribute('fill',colors[k]||'#ddd'); c.setAttribute('stroke','#fff'); c.setAttribute('stroke-width','1');
     const t=document.createElementNS('http://www.w3.org/2000/svg','text'); t.setAttribute('x',m.x+10); t.setAttribute('y',m.y-10); t.setAttribute('fill','#fff'); t.textContent=k;
+    g.append(c,t); svg.append(g);
+  }
+  for (const [name,p] of Object.entries(st.knownPoints||{})){
+    if(!st.calOk) continue;
+    const pp=worldToPixel(Number(p.x_m||0),Number(p.y_m||0)); if(!pp) continue;
+    const g=document.createElementNS('http://www.w3.org/2000/svg','g');
+    const c=document.createElementNS('http://www.w3.org/2000/svg','rect'); c.setAttribute('x',pp.x-6); c.setAttribute('y',pp.y-6); c.setAttribute('width',12); c.setAttribute('height',12); c.setAttribute('fill','#00ffaa'); c.setAttribute('stroke','#003322');
+    const t=document.createElementNS('http://www.w3.org/2000/svg','text'); t.setAttribute('x',pp.x+10); t.setAttribute('y',pp.y+4); t.setAttribute('fill','#00ffaa'); t.textContent=name;
     g.append(c,t); svg.append(g);
   }
   for (const n of st.nfa){
@@ -61,7 +69,7 @@ $('imgfile').onchange=(e)=>{const f=e.target.files?.[0]; if(!f) return; const ur
 $('mapWrap').onclick=async(e)=>{ const img=$('mapImg'); if(!img.src) return; const rect=img.getBoundingClientRect(); const x=e.clientX-rect.left, y=e.clientY-rect.top; if(x<0||y<0||x>st.w||y>st.h) return; if($('mode').value==='cal'){ if(!st.p0) st.p0={x,y}; else if(!st.p1) st.p1={x,y}; else st.p2={x,y}; st.calOk=Boolean(st.p0&&st.p1&&st.p2); if(st.calOk) setStatus('Калибровка: OK'); draw(); return; } if(!st.calOk) return; const dest=$('dest').value; st.markers.set(dest,{x,y}); const xy=pixelToWorld(x,y); if(xy){ await post('/api/set_point',{dest,x_m:xy.x_m,y_m:xy.y_m,label:dest}); await post('/api/click',{x_m:xy.x_m,y_m:xy.y_m,dest,note:dest}); } draw(); };
 $('clear').onclick=reset;
 $('save').onclick=async()=>{ if(!st.calOk) return; await post('/api/cal_status',{ok:true,details:'saved'}); setStatus('Калибровка: OK (saved)'); };
-async function sync(){ const res=await getJson('/api/state'); if(!res||!res.ok) return; st.nfa=Array.isArray(res.nfa_zones)?res.nfa_zones:[]; for(const [d,p] of Object.entries(res.points||{})){ if(typeof p.x_m!=='number') continue; const pp=worldToPixel(p.x_m,p.y_m); if(pp) st.markers.set(d,pp); } draw(); }
+async function sync(){ const res=await getJson('/api/state'); if(!res||!res.ok) return; st.nfa=Array.isArray(res.nfa_zones)?res.nfa_zones:[]; st.knownPoints = (res.known_points&&typeof res.known_points==='object') ? res.known_points : {}; for(const [d,p] of Object.entries(res.points||{})){ if(typeof p.x_m!=='number') continue; const pp=worldToPixel(p.x_m,p.y_m); if(pp) st.markers.set(d,pp); } draw(); }
 setInterval(sync,1000);
 </script>
 </body>
