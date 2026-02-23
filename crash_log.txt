@@ -1,0 +1,11 @@
+Traceback (most recent call last):
+  File "D:\arma_artillery_calc_v36_2_autostart_server_FIXED_webopen\run.py", line 18, in <module>
+    main()
+  File "D:\arma_artillery_calc_v36_2_autostart_server_FIXED_webopen\ui.py", line 297, in main
+    w = MainWindow(); w.show()
+  File "D:\arma_artillery_calc_v36_2_autostart_server_FIXED_webopen\ui.py", line 143, in __init__
+    self._build_tactical_tab()
+  File "D:\arma_artillery_calc_v36_2_autostart_server_FIXED_webopen\ui.py", line 201, in _build_tactical_tab
+    self.btn_start_server.clicked.connect(self._server_start_clicked)
+AttributeError: 'MainWindow' object has no attribute '_server_start_clicked'
+
