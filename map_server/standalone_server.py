@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlparse
 
 BASE = Path(__file__).resolve().parent
 CAL_STORE_FILE = BASE / "calibrations.json"
+STATE_FILE = BASE / "server_state.json"
 
 
 def _load_cal_store():
@@ -26,6 +27,21 @@ def _save_cal_store(store: dict):
         pass
 
 
+def _load_state_store():
+    try:
+        payload = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_state_store(store: dict):
+    try:
+        STATE_FILE.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
 CAL_STORE = _load_cal_store()
 STATE = {
     "ts": 0.0,
@@ -33,7 +49,20 @@ STATE = {
     "last_click": {"ts": 0.0, "x_m": None, "y_m": None, "dest": "", "note": ""},
     "points": {},
     "guns": {},
+    "known_points": {},
+    "nfa_zones": [],
 }
+
+STATE.update({k:v for k,v in _load_state_store().items() if k in ("points","guns","known_points","nfa_zones")})
+
+
+def _persist_state():
+    _save_state_store({
+        "points": STATE.get("points", {}),
+        "guns": STATE.get("guns", {}),
+        "known_points": STATE.get("known_points", {}),
+        "nfa_zones": STATE.get("nfa_zones", []),
+    })
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -109,6 +138,7 @@ class Handler(BaseHTTPRequestHandler):
             STATE["last_click"] = {"ts": now, "x_m": x, "y_m": y, "dest": dest, "note": note}
             if dest:
                 STATE["points"][dest] = {"x_m": x, "y_m": y, "ts": now, "label": note or dest}
+            _persist_state()
             return self._json(200, {"ok": True})
 
         if p.path == "/api/set_point":
@@ -119,6 +149,7 @@ class Handler(BaseHTTPRequestHandler):
             STATE["ts"] = now
             STATE["points"][dest] = {"x_m": x, "y_m": y, "ts": now, "label": label or dest}
             STATE["last_click"] = {"ts": now, "x_m": x, "y_m": y, "dest": dest, "note": label or dest}
+            _persist_state()
             return self._json(200, {"ok": True})
 
         if p.path == "/api/delete_point":
@@ -126,6 +157,43 @@ class Handler(BaseHTTPRequestHandler):
             if dest in STATE["points"]:
                 del STATE["points"][dest]
                 STATE["ts"] = now
+                _persist_state()
+            return self._json(200, {"ok": True})
+
+        if p.path == "/api/set_known_point":
+            key = str(data.get("name", "")).strip()
+            if not key:
+                return self._json(400, {"ok": False, "error": "name required"})
+            x = float(data.get("x_m", 0.0))
+            y = float(data.get("y_m", 0.0))
+            STATE["known_points"][key] = {"x_m": x, "y_m": y, "note": str(data.get("note", ""))}
+            STATE["ts"] = now
+            _persist_state()
+            return self._json(200, {"ok": True})
+
+        if p.path == "/api/delete_known_point":
+            key = str(data.get("name", "")).strip()
+            if key in STATE["known_points"]:
+                del STATE["known_points"][key]
+                STATE["ts"] = now
+                _persist_state()
+            return self._json(200, {"ok": True})
+
+        if p.path == "/api/set_nfa_zones":
+            zones = data.get("zones", [])
+            STATE["nfa_zones"] = zones if isinstance(zones, list) else []
+            STATE["ts"] = now
+            _persist_state()
+            return self._json(200, {"ok": True})
+
+        if p.path == "/api/reset_runtime_data":
+            STATE["points"] = {}
+            STATE["guns"] = {}
+            STATE["known_points"] = {}
+            STATE["nfa_zones"] = []
+            STATE["last_click"] = {"ts": 0.0, "x_m": None, "y_m": None, "dest": "", "note": ""}
+            STATE["ts"] = now
+            _persist_state()
             return self._json(200, {"ok": True})
 
         if p.path == "/api/gun_config":
@@ -136,6 +204,7 @@ class Handler(BaseHTTPRequestHandler):
                     g[key] = float(data.get(key))
             STATE["guns"][gun_id] = g
             STATE["ts"] = now
+            _persist_state()
             return self._json(200, {"ok": True, "gun": g})
 
         if p.path == "/api/cal_status":

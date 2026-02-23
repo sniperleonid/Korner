@@ -17,12 +17,15 @@ class SolutionWindow(QDialog):
 
         btn_row = QHBoxLayout()
         self.btn_copy = QPushButton("Копировать")
+        self.btn_pin = QPushButton("Открепить")
         self.btn_close = QPushButton("Скрыть")
         btn_row.addWidget(self.btn_copy)
+        btn_row.addWidget(self.btn_pin)
         btn_row.addWidget(self.btn_close)
         lay.addLayout(btn_row)
 
         self.btn_copy.clicked.connect(self.copy_text)
+        self.btn_pin.clicked.connect(self.toggle_pin)
         self.btn_close.clicked.connect(self.hide)
 
     def set_text(self, text: str):
@@ -39,3 +42,9 @@ class SolutionWindow(QDialog):
             return QGuiApplication.clipboard()
         except Exception:
             return None
+
+    def toggle_pin(self):
+        pinned = self.windowFlags() & Qt.WindowStaysOnTopHint
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, not bool(pinned))
+        self.btn_pin.setText("Открепить" if not pinned else "Закрепить")
+        self.show()
