@@ -11,12 +11,13 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-app = FastAPI(title="Arma FCS Map Server (LAN)
+app = FastAPI(title="Arma FCS Map Server (LAN)")
+
+
 @app.get("/api/ping")
 def api_ping():
     return {"ok": True}
 
-")
 
 app.add_middleware(
     CORSMiddleware,
