@@ -49,17 +49,19 @@ STATE = {
     "last_click": {"ts": 0.0, "x_m": None, "y_m": None, "dest": "", "note": ""},
     "points": {},
     "guns": {},
+    "views": {},
     "known_points": {},
     "nfa_zones": [],
 }
 
-STATE.update({k:v for k,v in _load_state_store().items() if k in ("points","guns","known_points","nfa_zones")})
+STATE.update({k:v for k,v in _load_state_store().items() if k in ("points","guns","views","known_points","nfa_zones")})
 
 
 def _persist_state():
     _save_state_store({
         "points": STATE.get("points", {}),
         "guns": STATE.get("guns", {}),
+        "views": STATE.get("views", {}),
         "known_points": STATE.get("known_points", {}),
         "nfa_zones": STATE.get("nfa_zones", []),
     })
@@ -189,6 +191,7 @@ class Handler(BaseHTTPRequestHandler):
         if p.path == "/api/reset_runtime_data":
             STATE["points"] = {}
             STATE["guns"] = {}
+            STATE["views"] = {}
             STATE["known_points"] = {}
             STATE["nfa_zones"] = []
             STATE["last_click"] = {"ts": 0.0, "x_m": None, "y_m": None, "dest": "", "note": ""}
@@ -206,6 +209,20 @@ class Handler(BaseHTTPRequestHandler):
             STATE["ts"] = now
             _persist_state()
             return self._json(200, {"ok": True, "gun": g})
+
+        if p.path == "/api/view_config":
+            key = str(data.get("dest", "")).strip().lower()
+            if not key:
+                return self._json(400, {"ok": False, "error": "dest required"})
+            rec = STATE["views"].get(key, {"heading_mil": 0.0, "range_m": 1500.0})
+            if "heading_mil" in data and data.get("heading_mil") is not None:
+                rec["heading_mil"] = float(data.get("heading_mil"))
+            if "range_m" in data and data.get("range_m") is not None:
+                rec["range_m"] = max(0.0, float(data.get("range_m")))
+            STATE["views"][key] = rec
+            STATE["ts"] = now
+            _persist_state()
+            return self._json(200, {"ok": True, "view": rec})
 
         if p.path == "/api/cal_status":
             STATE["calibration"] = {"ok": bool(data.get("ok", False)), "details": str(data.get("details", ""))}
