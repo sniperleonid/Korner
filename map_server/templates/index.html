@@ -1,0 +1,620 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Arma FCS Map (LAN)</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    html, body { height: 100%; margin:0; background:#0d0f12; color:#e6e6e6; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    #top { padding: 10px; border-bottom: 1px solid #2a2f36; position: sticky; top:0; background:#0d0f12; z-index:1000; }
+    .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .btn { background:#1b2027; color:#e6e6e6; border:1px solid #2a2f36; padding:8px 12px; border-radius:8px; cursor:pointer; }
+    .pill { padding:6px 10px; border-radius:999px; border:1px solid #2a2f36; background:#12161b; }
+    .warn { background:#2b210f; border-color:#6b4b1f; }
+    .good { background:#0f2b18; border-color:#1f6b3a; }
+    input { background:#0f1216; color:#e6e6e6; border:1px solid #2a2f36; padding:8px 10px; border-radius:8px; }
+    #map { height: calc(100% - 72px); }
+    .leaflet-container { background:#111; cursor: crosshair; }
+  </style>
+</head>
+<body>
+  <div id="top">
+    <div class="row">
+      <input id="imgfile" type="file" accept="image/*" class="btn" />
+      <button id="mode" class="btn">Режим: КАЛИБРОВКА</button>
+      <span class="pill warn" id="cal">калибровка: нет</span>
+      <input id="distm" value="1000" style="width:110px" title="Расстояние между P1 и P2, м" />
+      <button id="clear" class="btn">Сброс</button>
+    </div>
+  </div>
+  <div id="map"></div>
+  <script>
+  // WebMap v7:
+  // - Delete key removes selected marker (only if unlocked)
+  // - Gun heading: hold LMB on gun marker and drag; shows azimuth while dragging; on release saves heading
+  // - No deletion by dblclick anymore
+  // - Modes: КАЛИБРОВКА / МИССИЯ
+
+  const $ = (id)=>document.getElementById(id);
+  const btnMode = $("mode");
+  const calPill = $("cal");
+  const distInput = $("distm");
+  const btnClear = $("clear");
+  const fileInput = $("imgfile");
+  const row = document.querySelector("#top .row");
+
+  // Help (?)
+  const helpBtn = document.createElement("button");
+  helpBtn.className="btn";
+  helpBtn.textContent=" ? ";
+  helpBtn.title="Подсказки";
+  const helpBox = document.createElement("div");
+  helpBox.style.position="absolute";
+  helpBox.style.top="70px";
+  helpBox.style.left="10px";
+  helpBox.style.background="#12161b";
+  helpBox.style.border="1px solid #2a2f36";
+  helpBox.style.borderRadius="10px";
+  helpBox.style.padding="10px 12px";
+  helpBox.style.maxWidth="640px";
+  helpBox.style.display="none";
+  helpBox.style.zIndex="2000";
+  helpBox.innerHTML = `
+    <div style="font-weight:700;margin-bottom:6px;">Управление</div>
+    <div>• <b>DblClick</b> (КАЛИБРОВКА): P0 → P1 → P2</div>
+    <div>• <b>DblClick</b> (МИССИЯ): поставить метку</div>
+    <div>• <b>Delete</b>: удалить выбранную метку (если 🔓)</div>
+    <div>• <b>Ctrl + ЛКМ</b>: линейка A→B</div>
+    <div>• <b>Ctrl</b> два раза: очистить линейку</div>
+    <div>• <b>Орудие</b>: удерживай ЛКМ на метке 💥 и тяни — задашь азимут (показывает °/mil)</div>
+    <div>• <b>ПКМ</b>: координаты точки (если включено "Координаты")</div>
+  `;
+  document.body.appendChild(helpBox);
+  helpBtn.onclick = ()=> helpBox.style.display = (helpBox.style.display==="none") ? "block" : "none";
+
+  // Destination icon bar
+  const destBar = document.createElement("div");
+  destBar.style.display="flex";
+  destBar.style.gap="6px";
+  destBar.style.alignItems="center";
+
+  function mkIconBtn(label, icon, value){
+    const b=document.createElement("button");
+    b.className="btn";
+    b.style.padding="8px 10px";
+    b.innerHTML = `<span style="font-size:16px;line-height:1">${icon}</span>`;
+    b.title = label;
+    b.dataset.value=value;
+    return b;
+  }
+  const btnTarget = mkIconBtn("Цель", "🎯", "target");
+  const btnObs    = mkIconBtn("Наблюдатель", "👁️", "observer");
+  const btnDrone  = mkIconBtn("Дрон", "🛸", "drone");
+  const btnGun    = mkIconBtn("Орудие", "💥", "gun");
+
+  const gunSel = document.createElement("select");
+  gunSel.className="btn";
+  gunSel.style.padding="8px 10px";
+  gunSel.innerHTML = `<option value="1">#1</option><option value="2">#2</option><option value="3">#3</option><option value="4">#4</option><option value="5">#5</option>`;
+
+  // Mission lock
+  const lockBtn = document.createElement("button");
+  lockBtn.className="btn";
+  lockBtn.style.padding="8px 10px";
+  lockBtn.title="Блокировка изменений (МИССИЯ)";
+  let missionLocked = true;
+
+  // Right-click coords toggle
+  const coordsBtn = document.createElement("button");
+  coordsBtn.className="btn";
+  coordsBtn.style.padding="8px 10px";
+  coordsBtn.textContent="Координаты";
+  coordsBtn.title="ПКМ показывает координаты";
+  let showCoordsMode = true;
+  function setCoordsMode(v){ showCoordsMode=v; coordsBtn.style.opacity = v ? "1.0" : "0.55"; }
+  coordsBtn.onclick = ()=> setCoordsMode(!showCoordsMode);
+  setCoordsMode(true);
+
+  function setLocked(v){
+    missionLocked = v;
+    lockBtn.textContent = v ? "🔒" : "🔓";
+    markers.forEach(m=> m.dragging && (v ? m.dragging.disable() : m.dragging.enable()));
+  }
+  lockBtn.onclick = ()=> setLocked(!missionLocked);
+  setLocked(true);
+
+  let currentDest = "target";
+  function setDest(d){
+    currentDest=d;
+    [btnTarget,btnObs,btnDrone,btnGun].forEach(b=> b.style.outline = (b.dataset.value===d || (d.startsWith("gun") && b.dataset.value==="gun")) ? "2px solid rgba(121,255,162,0.7)" : "none");
+  }
+  btnTarget.onclick=()=>setDest("target");
+  btnObs.onclick=()=>setDest("observer");
+  btnDrone.onclick=()=>setDest("drone");
+  btnGun.onclick=()=>setDest("gun"+gunSel.value);
+  gunSel.onchange=()=>{ if(currentDest.startsWith("gun") || currentDest==="gun") setDest("gun"+gunSel.value); };
+
+  destBar.appendChild(btnTarget);
+  destBar.appendChild(btnObs);
+  destBar.appendChild(btnDrone);
+  destBar.appendChild(btnGun);
+  destBar.appendChild(gunSel);
+
+  // Calibration UI
+  const x0 = document.createElement("input");
+  const y0 = document.createElement("input");
+  x0.placeholder="P0 X (04778/47780)";
+  y0.placeholder="P0 Y (04932/49320)";
+  x0.style.width="150px"; y0.style.width="150px";
+
+  const stepSel = document.createElement("select");
+  stepSel.className="btn";
+  stepSel.style.padding="8px 10px";
+  stepSel.innerHTML = `<option value="500">Сетка: 500м</option><option value="1000" selected>Сетка: 1км</option><option value="2000">Сетка: 2км</option><option value="manual">Сетка: ручная</option>`;
+  const stepManual = document.createElement("input");
+  stepManual.value="1000";
+  stepManual.style.width="90px";
+  stepManual.title="Шаг сетки (м)";
+  const btnSave = document.createElement("button");
+  btnSave.className="btn";
+  btnSave.textContent="Сохранить калибровку";
+
+  // Insert into row
+  row.insertBefore(helpBtn, btnClear);
+  row.insertBefore(lockBtn, btnClear);
+  row.insertBefore(coordsBtn, btnClear);
+  row.insertBefore(btnSave, btnClear);
+  row.insertBefore(stepManual, btnClear);
+  row.insertBefore(stepSel, btnClear);
+  row.insertBefore(y0, btnClear);
+  row.insertBefore(x0, btnClear);
+  row.insertBefore(destBar, btnClear);
+
+  // Leaflet
+  let map = L.map("map", {crs: L.CRS.Simple, zoomControl:true});
+  map.doubleClickZoom.disable();
+
+  let imgLayer=null;
+  let imgBounds=[[0,0],[1000,1000]];
+  let mapId=null;
+
+  let mode="cal"; // cal|mission
+  let p0=null,p1=null,p2=null;
+  let m0=null,m1=null,m2=null;
+  let line12=null;
+  let calOk=false;
+
+  let gridLayer=null;
+
+  // ruler
+  let rA=null,rB=null,rLine=null,rTip=null;
+  let lastCtrlTs=0;
+
+  // coord tooltip
+  let coordTip=null;
+
+  // selection
+  let selectedDest=null;
+
+  // gun drag heading
+  let dragGunDest=null;
+  let dragLine=null;
+  let dragTip=null;
+
+  const markers = new Map(); // dest->marker
+
+  function setMode(m){
+    mode=m;
+    btnMode.textContent = (mode==="cal" ? "КАЛИБРОВКА" : "МИССИЯ");
+    updateCalVisibility();
+    updateCalUIVisibility();
+    lockBtn.style.display = (mode==="mission") ? "" : "none";
+    coordsBtn.style.display = (mode==="mission") ? "" : "none";
+  }
+  setMode("cal");
+  setDest("target");
+
+  function updateCalUIVisibility(){
+    const show = (mode==="cal");
+    for(const el of [x0,y0,stepSel,stepManual,distInput,btnSave,btnClear,calPill]){
+      el.style.display = show ? "" : "none";
+    }
+  }
+
+  async function post(url,obj){
+    try{ await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(obj)});}catch(e){}
+  }
+  async function getJson(url){
+    try{ return await (await fetch(url)).json(); }catch(e){ return null; }
+  }
+
+  function grid_to_meters(s){
+    s=(s||"").trim();
+    if(!s) throw new Error("Пустая координата P0");
+    if(/m$/i.test(s)) return parseFloat(s.slice(0,-1));
+    if(/^[0-9]+$/.test(s)){
+      const n=s.length; const v=parseFloat(s);
+      if(n===3) return v*1000;
+      if(n===4) return v*100;
+      if(n===5) return v*10;
+      if(n===6) return v*1;
+      return v;
+    }
+    const v=parseFloat(s.replace(",","."));
+    if(Number.isFinite(v)) return v;
+    throw new Error("Неверная координата: "+s);
+  }
+
+  function metersPerPixel(){
+    if(!p1||!p2) return null;
+    const dx=p2.lng-p1.lng, dy=p2.lat-p1.lat;
+    const Lpx=Math.hypot(dx,dy);
+    if(Lpx<1e-6) return null;
+    const dist=Number(distInput.value||1000);
+    return dist/Lpx;
+  }
+
+  function localXY(pt){
+    const dx=p2.lng-p1.lng, dy=p2.lat-p1.lat;
+    const Lpx=Math.hypot(dx,dy);
+    if(Lpx<1e-6) return {x:0,y:0};
+    const ux=dx/Lpx, uy=dy/Lpx;
+    const wx=pt.lng-p1.lng, wy=pt.lat-p1.lat;
+    const px=wx*ux+wy*uy;
+    const py=-wx*uy+wy*ux;
+    const mpp=metersPerPixel();
+    return {x:px*mpp, y:py*mpp};
+  }
+
+  function worldXY(pt){
+    const X0=grid_to_meters(x0.value||"0");
+    const Y0=grid_to_meters(y0.value||"0");
+    const lp=localXY(pt);
+    const l0=localXY(p0);
+    return {x_m: X0 + (lp.x-l0.x), y_m: Y0 + (lp.y-l0.y)};
+  }
+
+  function clearLayer(l){ if(l){ map.removeLayer(l); } }
+  function resetAll(){
+    p0=p1=p2=null; calOk=false;
+    clearLayer(m0); m0=null; clearLayer(m1); m1=null; clearLayer(m2); m2=null;
+    clearLayer(line12); line12=null;
+    clearGrid(); clearRuler();
+    calPill.textContent="калибровка: нет";
+    calPill.className="pill warn";
+    post("/api/cal_status",{ok:false,details:"not calibrated"});
+    updateCalVisibility();
+  }
+
+  btnClear.onclick = ()=> resetAll();
+  btnMode.onclick = ()=> setMode(mode==="cal" ? "mission" : "cal");
+
+  function selectDest(dest){
+    selectedDest=dest;
+    // highlight marker tooltip
+  }
+
+  function makeMarker(latlng,label,color,iconEmoji){
+    const icon=L.divIcon({className:"", html:`<div style="width:18px;height:18px;border-radius:50%;background:${color};border:2px solid rgba(255,255,255,0.6);display:flex;align-items:center;justify-content:center;font-size:12px">${iconEmoji||""}</div>`});
+    const marker=L.marker(latlng,{draggable:!missionLocked,icon});
+    marker.addTo(map);
+    marker.bindTooltip(label,{permanent:false,direction:"right"});
+    marker.on("click", ()=> selectDest(label._dest || null));
+    return marker;
+  }
+
+  function updateLine12(){
+    if(p1&&p2){
+      const pts=[p1,p2];
+      if(!line12) line12=L.polyline(pts,{weight:2,opacity:0.9}).addTo(map);
+      else line12.setLatLngs(pts);
+    }
+  }
+
+  function setP0(latlng){
+    p0=latlng;
+    clearLayer(m0);
+    m0=makeMarker(p0,"P0","#ffd166","P0");
+    m0.dragging.enable();
+    m0.on("drag", e=>{ p0=e.target.getLatLng(); updateGrid(); updateRuler(); });
+    calPill.textContent="калибровка: выбери P1";
+    calPill.className="pill warn";
+    updateCalVisibility();
+  }
+  function setP1(latlng){
+    p1=latlng;
+    clearLayer(m1);
+    m1=makeMarker(p1,"P1","#79ffa2","P1");
+    m1.dragging.enable();
+    m1.on("drag", e=>{ p1=e.target.getLatLng(); updateLine12(); updateGrid(); updateRuler(); });
+    calPill.textContent="калибровка: выбери P2";
+    calPill.className="pill warn";
+    updateCalVisibility();
+  }
+  function setP2(latlng){
+    p2=latlng;
+    clearLayer(m2);
+    m2=makeMarker(p2,"P2","#79ffa2","P2");
+    m2.dragging.enable();
+    m2.on("drag", e=>{ p2=e.target.getLatLng(); updateLine12(); updateGrid(); updateRuler(); });
+    calOk=true;
+    updateLine12(); updateGrid();
+    calPill.textContent='калибровка: OK (сохрани)';
+    calPill.className="pill warn";
+    post("/api/cal_status",{ok:true,details:"calibrated (unsaved)"});
+    updateCalVisibility();
+  }
+
+  function updateCalVisibility(){
+    const show = (mode==="cal");
+    const layers = [m0,m1,m2,line12];
+    for(const l of layers){
+      if(!l) continue;
+      const onMap = map.hasLayer(l);
+      if(show && !onMap) l.addTo(map);
+      if(!show && onMap) map.removeLayer(l);
+    }
+  }
+
+  function gridStep(){
+    const v=stepSel.value;
+    if(v==="manual") return Math.max(1, Number(stepManual.value||1000));
+    return Number(v);
+  }
+  function clearGrid(){ if(gridLayer){ map.removeLayer(gridLayer); gridLayer=null; } }
+  function updateGrid(){
+    clearGrid();
+    if(!calOk) return;
+    const mpp=metersPerPixel(); if(!mpp) return;
+    const stepM=gridStep(); const stepPx=stepM/mpp;
+    const top=0,left=0,bottom=imgBounds[1][0],right=imgBounds[1][1];
+    gridLayer=L.layerGroup();
+    for(let x=0;x<=right;x+=stepPx) L.polyline([[top,x],[bottom,x]],{weight:1,opacity:0.22}).addTo(gridLayer);
+    for(let y=0;y<=bottom;y+=stepPx) L.polyline([[y,left],[y,right]],{weight:1,opacity:0.22}).addTo(gridLayer);
+    gridLayer.addTo(map);
+  }
+  stepSel.onchange=updateGrid;
+  stepManual.onchange=updateGrid;
+  distInput.onchange=()=>{ updateLine12(); updateGrid(); updateRuler(); };
+
+  function clearRuler(){
+    rA=rB=null;
+    if(rLine){ map.removeLayer(rLine); rLine=null; }
+    if(rTip){ map.removeLayer(rTip); rTip=null; }
+  }
+  function bearingMil(de,dn){
+    const az=Math.atan2(de,dn);
+    let mil=az/(2*Math.PI)*6400.0;
+    mil=((mil%6400)+6400)%6400;
+    return mil;
+  }
+  function updateRuler(){
+    if(!rA||!rB) return;
+    if(!rLine) rLine=L.polyline([rA,rB],{weight:2,opacity:0.9}).addTo(map);
+    else rLine.setLatLngs([rA,rB]);
+    let dist=0, azMil=0, azDeg=0;
+    if(calOk){
+      const a=worldXY(rA), b=worldXY(rB);
+      const de=b.x_m-a.x_m, dn=b.y_m-a.y_m;
+      dist=Math.hypot(de,dn);
+      azMil=bearingMil(de,dn);
+      azDeg=azMil*(360/6400);
+    } else {
+      const dx=rB.lng-rA.lng, dy=rB.lat-rA.lat;
+      dist=Math.hypot(dx,dy);
+      azMil=bearingMil(dx,dy);
+    }
+    const txt=calOk
+      ? `Линейка: ${dist.toFixed(1)} м · AZ ${azMil.toFixed(1)} mil (${azDeg.toFixed(2)}°)`
+      : `Линейка: ${dist.toFixed(1)} px · AZ ${azMil.toFixed(1)} mil`;
+    if(!rTip) rTip=L.marker(rB,{interactive:false,opacity:0.0}).addTo(map).bindTooltip(txt,{permanent:true,direction:"right"}).openTooltip();
+    else { rTip.setLatLng(rB); rTip.setTooltipContent(txt); }
+  }
+
+  document.addEventListener("keydown",(ev)=>{
+    if(ev.key==="Control"){
+      const now=Date.now();
+      if(now-lastCtrlTs<450) clearRuler();
+      lastCtrlTs=now;
+    }
+    if(ev.key==="Delete" || ev.key==="Backspace"){
+      if(missionLocked) return;
+      if(!selectedDest) return;
+      const mk=markers.get(selectedDest);
+      if(mk){
+        map.removeLayer(mk);
+        markers.delete(selectedDest);
+        post("/api/delete_point",{dest:selectedDest});
+        selectedDest=null;
+      }
+    }
+  });
+
+  async function upsertPoint(dest, latlng){
+    const isGun=/^gun[1-5]$/.test(dest);
+    const color=isGun ? "#79ffa2" : (dest==="target" ? "#ff8a8a" : (dest==="observer" ? "#8ad1ff" : "#caa7ff"));
+    const emoji=isGun ? "💥" : (dest==="target" ? "🎯" : (dest==="observer" ? "👁️" : "🛸"));
+    const label=isGun ? ("gun"+dest.replace("gun","")) : dest; // internal label
+    const display=isGun ? ("Орудие "+dest.replace("gun","")) : (dest==="target"?"Цель":(dest==="observer"?"Наблюдатель":"Дрон"));
+
+    if(markers.has(dest)){
+      const mk=markers.get(dest);
+      mk.setLatLng(latlng);
+      return mk;
+    }
+    const mk=makeMarker(latlng,display,color,emoji);
+    mk._dest = dest;
+    mk.on("click", ()=>{ selectedDest=dest; });
+
+    if(missionLocked) mk.dragging.disable();
+
+    mk.on("drag", async (e)=>{
+      if(missionLocked) return;
+      if(!calOk) return;
+      const xy=worldXY(e.target.getLatLng());
+      await post("/api/set_point",{dest,x_m:xy.x_m,y_m:xy.y_m,label:display});
+    });
+
+    // Gun heading by drag
+    if(isGun){
+      mk.on("mousedown", (ev)=>{
+        if(missionLocked) return;
+        dragGunDest = dest;
+        const c = mk.getLatLng();
+        dragLine = L.polyline([c,c],{weight:2,opacity:0.9}).addTo(map);
+        dragTip = L.marker(c,{interactive:false,opacity:0.0}).addTo(map).bindTooltip("AZ …",{permanent:true,direction:"right"}).openTooltip();
+      });
+    }
+
+    markers.set(dest,mk);
+    return mk;
+  }
+
+  map.on("mousemove", (e)=>{
+    if(!dragGunDest || !dragLine) return;
+    const mk = markers.get(dragGunDest);
+    if(!mk || !calOk) return;
+    const c = mk.getLatLng();
+    dragLine.setLatLngs([c, e.latlng]);
+    const a=worldXY(c);
+    const b=worldXY(e.latlng);
+    const mil=bearingMil(b.x_m-a.x_m, b.y_m-a.y_m);
+    const deg=mil*(360/6400);
+    if(dragTip){
+      dragTip.setLatLng(e.latlng);
+      dragTip.setTooltipContent(`AZ ${deg.toFixed(1)}°  (${mil.toFixed(1)} mil)`);
+    }
+  });
+
+  map.on("mouseup", async (e)=>{
+    if(!dragGunDest) return;
+    const mk = markers.get(dragGunDest);
+    if(mk && calOk){
+      const a=worldXY(mk.getLatLng());
+      const b=worldXY(e.latlng);
+      const mil=bearingMil(b.x_m-a.x_m, b.y_m-a.y_m);
+      await post("/api/gun_config",{gun_id:dragGunDest, heading_mil: mil});
+    }
+    if(dragLine){ map.removeLayer(dragLine); dragLine=null; }
+    if(dragTip){ map.removeLayer(dragTip); dragTip=null; }
+    dragGunDest=null;
+  });
+
+  // Right-click coords
+  map.on("contextmenu", async (e)=>{
+    if(!imgLayer) return;
+    if(!showCoordsMode) return;
+    if(!calOk){ alert("Нет калибровки"); return; }
+    const xy=worldXY(e.latlng);
+    const txt=`X=${xy.x_m.toFixed(1)}  Y=${xy.y_m.toFixed(1)}`;
+    if(coordTip) map.removeLayer(coordTip);
+    coordTip=L.marker(e.latlng,{interactive:false,opacity:0.0}).addTo(map).bindTooltip(txt,{permanent:true,direction:"right"}).openTooltip();
+  });
+
+  // Ctrl ruler & mission click sends fast click
+  map.on("click",(e)=>{
+    if(!imgLayer) return;
+    if(e.originalEvent && e.originalEvent.ctrlKey){
+      if(!rA){ rA=e.latlng; rB=null; return; }
+      rB=e.latlng; updateRuler(); return;
+    }
+    if(mode==="mission"){
+      if(!calOk){ alert("Сначала калибровка"); return; }
+      const xy=worldXY(e.latlng);
+      post("/api/click",{x_m:xy.x_m,y_m:xy.y_m,dest:currentDest,note:""});
+    }
+  });
+
+  map.on("dblclick", async (e)=>{
+    if(!imgLayer) return;
+    if(mode==="cal"){
+      if(!p0){ setP0(e.latlng); return; }
+      if(!p1){ setP1(e.latlng); return; }
+      if(!p2){ setP2(e.latlng); return; }
+      const d0=Math.hypot(e.latlng.lng-p0.lng, e.latlng.lat-p0.lat);
+      const d1=Math.hypot(e.latlng.lng-p1.lng, e.latlng.lat-p1.lat);
+      const d2=Math.hypot(e.latlng.lng-p2.lng, e.latlng.lat-p2.lat);
+      const mn=Math.min(d0,d1,d2);
+      if(mn===d0) setP0(e.latlng);
+      else if(mn===d1) setP1(e.latlng);
+      else setP2(e.latlng);
+      updateLine12(); updateGrid(); updateRuler();
+      return;
+    }
+    // mission: place marker + send
+    if(!calOk){ alert("Сначала калибровка"); return; }
+    const dest=currentDest.startsWith("gun") ? currentDest : currentDest;
+    await upsertPoint(dest, e.latlng);
+    const xy=worldXY(e.latlng);
+    await post("/api/set_point",{dest,x_m:xy.x_m,y_m:xy.y_m,label:dest});
+    await post("/api/click",{x_m:xy.x_m,y_m:xy.y_m,dest,note:dest});
+  });
+
+  btnSave.onclick = async ()=>{
+    if(!calOk){ alert("Сначала калибровка: P0→P1→P2"); return; }
+    calPill.textContent="калибровка: OK";
+    calPill.className="pill good";
+    post("/api/cal_status",{ok:true,details:"calibrated (saved)"});
+    if(mapId){
+      const payload = {
+        x0:x0.value, y0:y0.value,
+        distm: distInput.value,
+        stepSel: stepSel.value,
+        stepManual: stepManual.value,
+        p0: {lat:p0.lat,lng:p0.lng},
+        p1: {lat:p1.lat,lng:p1.lng},
+        p2: {lat:p2.lat,lng:p2.lng},
+      };
+      await post("/api/save_calibration",{map_id: mapId, payload});
+    }
+  };
+
+  function tryAutoLoadCalibration(){
+    if(!mapId) return;
+    getJson("/api/load_calibration?map_id=" + encodeURIComponent(mapId)).then((res)=>{
+      if(!res || !res.ok) return;
+      const c=res.payload||{};
+      x0.value = c.x0 || x0.value;
+      y0.value = c.y0 || y0.value;
+      distInput.value = c.distm || distInput.value;
+      stepSel.value = c.stepSel || stepSel.value;
+      stepManual.value = c.stepManual || stepManual.value;
+      if(c.p0) setP0(L.latLng(c.p0.lat,c.p0.lng));
+      if(c.p1) setP1(L.latLng(c.p1.lat,c.p1.lng));
+      if(c.p2) setP2(L.latLng(c.p2.lat,c.p2.lng));
+      updateLine12(); updateGrid(); updateRuler();
+      calPill.textContent="калибровка: OK (загружено)";
+      calPill.className="pill good";
+    });
+  }
+
+  function loadImage(file){
+    const url=URL.createObjectURL(file);
+    const img=new Image();
+    img.onload=()=>{
+      imgBounds=[[0,0],[img.height,img.width]];
+      if(imgLayer) map.removeLayer(imgLayer);
+      imgLayer=L.imageOverlay(url,imgBounds).addTo(map);
+      map.fitBounds(imgBounds);
+      resetAll();
+      mapId = `${file.name}::${file.size}::${file.lastModified}`;
+      tryAutoLoadCalibration();
+      setMode("cal");
+    };
+    img.src=url;
+  }
+  fileInput.addEventListener("change",(e)=>{
+    const f=e.target.files?.[0];
+    if(f) loadImage(f);
+  });
+
+  updateCalUIVisibility();
+  resetAll();
+</script>
+
+
+
+</body>
+</html>
