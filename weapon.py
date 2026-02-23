@@ -36,6 +36,14 @@ DEFAULT_WEAPON_CATALOG: Dict[str, WeaponProfile] = {
             ProjectileProfile(name="Актив-реактивный", table_folder="tables"),
         ],
     ),
+    "m777": WeaponProfile(
+        name="M777 155мм",
+        kind="Орудие",
+        projectiles=[
+            ProjectileProfile(name="HE M795", table_folder="tables"),
+            ProjectileProfile(name="RAP M549A1", table_folder="tables"),
+        ],
+    ),
     "grenade_launcher": WeaponProfile(
         name="Автоматический гранатомет",
         kind="Гранатомет",

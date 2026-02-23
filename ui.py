@@ -1,4 +1,4 @@
-import os, sys, math, re, traceback, json, socket, subprocess, threading, urllib.error, urllib.request
+import os, sys, math, re, traceback, json, socket, subprocess, threading, time, urllib.error, urllib.request
 
 import webbrowser
 from dataclasses import dataclass
@@ -142,6 +142,7 @@ class MainWindow(QMainWindow):
         self._status_ping_busy = False
         self._pending_web_payload = None
         self._pending_server_online = None
+        self._last_local_sync_ts = 0.0
         self.nfa_zones: List[dict] = []
         self.known_points: Dict[str, dict] = {}
         self.fire_history: List[str] = []
@@ -811,6 +812,71 @@ class MainWindow(QMainWindow):
             return
         self._server_start_clicked()
 
+    def _range_limits_for_current_profile(self) -> Tuple[float, float]:
+        profile = DEFAULT_WEAPON_CATALOG[self._active_weapon_key()]
+        pidx = max(0, self.projectile_name.currentIndex()) if hasattr(self, "projectile_name") else 0
+        projectile = profile.projectiles[min(pidx, len(profile.projectiles)-1)]
+        sets = [self.tables.direct, self.tables.low, self.tables.high]
+        mins: List[float] = []
+        maxs: List[float] = []
+        for ts in sets:
+            if ts is None:
+                continue
+            for cid in ts.charges:
+                arr = ts.npz[f"range_c{cid}"]
+                mins.append(float(arr.min()))
+                maxs.append(float(arr.max()))
+        if not mins or not maxs:
+            return 0.0, 6000.0
+        # crude expansion for RAP-like rounds so map sector remains usable
+        bonus = 1.1 if any(k in projectile.name.lower() for k in ("rap", "реак", "active")) else 1.0
+        return max(0.0, min(mins)), max(max(maxs) * bonus, 1000.0)
+
+    def _gun_sector_defaults(self) -> Tuple[float, float]:
+        key = self._active_weapon_key().lower()
+        if "m777" in key:
+            return 533.3, 30.0
+        return 6400.0, 360.0
+
+    def _sync_local_points_to_server(self, base_url: str):
+        now = time.time()
+        if now - float(getattr(self, "_last_local_sync_ts", 0.0)) < 1.0:
+            return
+        self._last_local_sync_ts = now
+
+        base = (base_url or "").rstrip("/") + "/"
+        try:
+            min_r, max_r = self._range_limits_for_current_profile()
+            sector_mil, _ = self._gun_sector_defaults()
+            count = self.battery_guns_count.get(self.current_battery, 5)
+            for idx in range(1, count + 1):
+                if idx - 1 >= len(self.guns):
+                    continue
+                g = self.guns[idx - 1]
+                gx = (g.x.text() or "").strip()
+                gy = (g.y.text() or "").strip()
+                if not gx or not gy:
+                    continue
+                x = self._parse_coord_field(g.x, f"gun{idx} X")
+                y = self._parse_coord_field(g.y, f"gun{idx} Y")
+                label = f"Б{self.current_battery}-О{idx}"
+                _ = http_get_json  # keep lint calm for mixed style module
+                req = urllib.request.Request(base + "api/set_point", data=json.dumps({"dest": f"gun{idx}", "x_m": x, "y_m": y, "label": label}).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
+                urllib.request.urlopen(req, timeout=0.15).read()
+                req2 = urllib.request.Request(base + "api/gun_config", data=json.dumps({"gun_id": f"gun{idx}", "sector_mil": sector_mil, "min_range": min_r, "max_range": max_r}).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
+                urllib.request.urlopen(req2, timeout=0.15).read()
+
+            for dest, fx, fy in (("observer", self.ox, self.oy), ("drone", self.dx, self.dy)):
+                xv = (fx.text() or "").strip(); yv = (fy.text() or "").strip()
+                if not xv or not yv:
+                    continue
+                x = self._parse_coord_field(fx, f"{dest} X")
+                y = self._parse_coord_field(fy, f"{dest} Y")
+                req = urllib.request.Request(base + "api/set_point", data=json.dumps({"dest": dest, "x_m": x, "y_m": y, "label": dest}).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
+                urllib.request.urlopen(req, timeout=0.15).read()
+        except Exception:
+            pass
+
     def _web_poll(self):
         # Consume payload prepared by background worker (if any)
         with self._net_lock:
@@ -832,6 +898,7 @@ class MainWindow(QMainWindow):
                 if not req_base.endswith("/"):
                     req_base += "/"
                 try:
+                    self._sync_local_points_to_server(req_base.rstrip("/"))
                     click = http_get_json(req_base + "api/last_click", timeout=0.2)
                     state = http_get_json(req_base + "api/state", timeout=0.2)
                     if click is None and state is None:

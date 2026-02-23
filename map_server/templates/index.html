@@ -32,44 +32,107 @@
 </div>
 <script>
 const $=id=>document.getElementById(id);
-const st={img:null,w:0,h:0,p0:null,p1:null,p2:null,calOk:false,markers:new Map(),nfa:[],knownPoints:{}};
+const SVG_NS='http://www.w3.org/2000/svg';
+const st={img:null,w:0,h:0,p0:null,p1:null,p2:null,calOk:false,markers:new Map(),nfa:[],knownPoints:{},guns:{},views:{},rulers:[],drag:null};
 const colors={target:'#ff5555',observer:'#88ccff',drone:'#f5d742',gun1:'#55ff99',gun2:'#55ff99',gun3:'#55ff99',gun4:'#55ff99',gun5:'#55ff99'};
 async function post(url,obj){try{await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(obj)});}catch(e){}}
 async function getJson(url){try{return await (await fetch(url)).json();}catch(e){return null;}}
 function setStatus(t){$('status').textContent=t;}
-function reset(){st.p0=st.p1=st.p2=null;st.calOk=false;st.markers.clear();draw();setStatus('Калибровка: нет');post('/api/cal_status',{ok:false,details:'reset'});}
+function reset(){st.p0=st.p1=st.p2=null;st.calOk=false;st.markers.clear();st.rulers=[];draw();setStatus('Калибровка: нет');post('/api/cal_status',{ok:false,details:'reset'});}
+function bearingMilFromEN(dE,dN){const ang=Math.atan2(dE,dN);return ((ang/(2*Math.PI))*6400+6400)%6400;}
+function bearingDegFromEN(dE,dN){return (bearingMilFromEN(dE,dN)*360/6400)%360;}
+function milToRad(m){return (m/6400)*Math.PI*2;}
+function drawSector(svg, marker, cfg){
+  const cx=marker.x, cy=marker.y;
+  const minR=(Number(cfg.min_range||0))/Math.max(0.1,pixelsToMeters());
+  const maxR=(Number(cfg.max_range||0))/Math.max(0.1,pixelsToMeters());
+  const sectorMil=Math.max(1, Number(cfg.sector_mil||6400));
+  const heading=Number(cfg.heading_mil||0);
+  if(maxR<=0) return;
+  if(sectorMil>=6399){
+    const outer=document.createElementNS(SVG_NS,'circle'); outer.setAttribute('cx',cx); outer.setAttribute('cy',cy); outer.setAttribute('r',maxR); outer.setAttribute('fill','rgba(85,255,153,0.08)'); outer.setAttribute('stroke','rgba(85,255,153,0.55)'); svg.append(outer);
+    if(minR>1){const inner=document.createElementNS(SVG_NS,'circle'); inner.setAttribute('cx',cx); inner.setAttribute('cy',cy); inner.setAttribute('r',minR); inner.setAttribute('fill','#000'); inner.setAttribute('fill-opacity','0.35'); inner.setAttribute('stroke','rgba(85,255,153,0.4)'); svg.append(inner);}    
+    return;
+  }
+  const half=sectorMil/2;
+  const a1=milToRad(heading-half), a2=milToRad(heading+half);
+  const x1=cx + Math.sin(a1)*maxR, y1=cy - Math.cos(a1)*maxR;
+  const x2=cx + Math.sin(a2)*maxR, y2=cy - Math.cos(a2)*maxR;
+  const x3=cx + Math.sin(a2)*minR, y3=cy - Math.cos(a2)*minR;
+  const x4=cx + Math.sin(a1)*minR, y4=cy - Math.cos(a1)*minR;
+  const large = sectorMil>3200 ? 1:0;
+  const d=`M ${x1} ${y1} A ${maxR} ${maxR} 0 ${large} 1 ${x2} ${y2} L ${x3} ${y3} A ${minR} ${minR} 0 ${large} 0 ${x4} ${y4} Z`;
+  const path=document.createElementNS(SVG_NS,'path'); path.setAttribute('d',d); path.setAttribute('fill','rgba(85,255,153,0.12)'); path.setAttribute('stroke','rgba(85,255,153,0.6)'); svg.append(path);
+}
 function draw(){
   const svg=$('overlay'); svg.innerHTML=''; svg.setAttribute('width',st.w); svg.setAttribute('height',st.h);
-  for (const [k,m] of st.markers){const g=document.createElementNS('http://www.w3.org/2000/svg','g');
-    const c=document.createElementNS('http://www.w3.org/2000/svg','circle'); c.setAttribute('cx',m.x); c.setAttribute('cy',m.y); c.setAttribute('r',8); c.setAttribute('fill',colors[k]||'#ddd'); c.setAttribute('stroke','#fff'); c.setAttribute('stroke-width','1');
-    const t=document.createElementNS('http://www.w3.org/2000/svg','text'); t.setAttribute('x',m.x+10); t.setAttribute('y',m.y-10); t.setAttribute('fill','#fff'); t.textContent=k;
+
+  for(const [k,m] of st.markers){ if(!m) continue;
+    if(k.startsWith('gun')) drawSector(svg,m,st.guns[k]||{});
+  }
+
+  for(const [k,m] of st.markers){const g=document.createElementNS(SVG_NS,'g');
+    const c=document.createElementNS(SVG_NS,'circle'); c.setAttribute('cx',m.x); c.setAttribute('cy',m.y); c.setAttribute('r',8); c.setAttribute('fill',colors[k]||'#ddd'); c.setAttribute('stroke','#fff'); c.setAttribute('stroke-width','1');
+    const t=document.createElementNS(SVG_NS,'text'); t.setAttribute('x',m.x+10); t.setAttribute('y',m.y-10); t.setAttribute('fill','#fff'); t.textContent=m.label||k;
     g.append(c,t); svg.append(g);
   }
+
+  for(const [dest,m] of st.markers){
+    if(!(dest.startsWith('gun')||dest==='observer'||dest==='drone')) continue;
+    const view=st.views[dest]||st.guns[dest]||{};
+    const range=Number(view.range_m || view.max_range || 1500);
+    if(range<=0) continue;
+    const heading=Number(view.heading_mil||0);
+    const len=range/Math.max(0.1,pixelsToMeters());
+    const a=milToRad(heading);
+    const x2=m.x + Math.sin(a)*len;
+    const y2=m.y - Math.cos(a)*len;
+    const line=document.createElementNS(SVG_NS,'line'); line.setAttribute('x1',m.x); line.setAttribute('y1',m.y); line.setAttribute('x2',x2); line.setAttribute('y2',y2); line.setAttribute('stroke',dest==='gun1'||dest.startsWith('gun')?'#55ff99':'#9fd9ff'); line.setAttribute('stroke-width','2'); line.setAttribute('stroke-dasharray',dest.startsWith('gun')?'':'8 5');
+    svg.append(line);
+  }
+
+  for (const r of st.rulers){
+    const line=document.createElementNS(SVG_NS,'line'); line.setAttribute('x1',r.x1); line.setAttribute('y1',r.y1); line.setAttribute('x2',r.x2); line.setAttribute('y2',r.y2); line.setAttribute('stroke','#ffd75e'); line.setAttribute('stroke-width','2'); svg.append(line);
+    const text=document.createElementNS(SVG_NS,'text'); text.setAttribute('x',(r.x1+r.x2)/2+8); text.setAttribute('y',(r.y1+r.y2)/2+8); text.setAttribute('fill','#ffd75e'); text.textContent=r.text; svg.append(text);
+  }
+
   for (const [name,p] of Object.entries(st.knownPoints||{})){
     if(!st.calOk) continue;
     const pp=worldToPixel(Number(p.x_m||0),Number(p.y_m||0)); if(!pp) continue;
-    const g=document.createElementNS('http://www.w3.org/2000/svg','g');
-    const c=document.createElementNS('http://www.w3.org/2000/svg','rect'); c.setAttribute('x',pp.x-6); c.setAttribute('y',pp.y-6); c.setAttribute('width',12); c.setAttribute('height',12); c.setAttribute('fill','#00ffaa'); c.setAttribute('stroke','#003322');
-    const t=document.createElementNS('http://www.w3.org/2000/svg','text'); t.setAttribute('x',pp.x+10); t.setAttribute('y',pp.y+4); t.setAttribute('fill','#00ffaa'); t.textContent=name;
+    const g=document.createElementNS(SVG_NS,'g');
+    const c=document.createElementNS(SVG_NS,'rect'); c.setAttribute('x',pp.x-6); c.setAttribute('y',pp.y-6); c.setAttribute('width',12); c.setAttribute('height',12); c.setAttribute('fill','#00ffaa'); c.setAttribute('stroke','#003322');
+    const t=document.createElementNS(SVG_NS,'text'); t.setAttribute('x',pp.x+10); t.setAttribute('y',pp.y+4); t.setAttribute('fill','#00ffaa'); t.textContent=name;
     g.append(c,t); svg.append(g);
   }
+
   for (const n of st.nfa){
     if(!st.calOk) continue;
     const p=worldToPixel(n.x_m,n.y_m); if(!p) continue;
     const r=n.radius_m/pixelsToMeters();
-    const c=document.createElementNS('http://www.w3.org/2000/svg','circle'); c.setAttribute('cx',p.x); c.setAttribute('cy',p.y); c.setAttribute('r',r); c.setAttribute('fill','rgba(255,80,80,.15)'); c.setAttribute('stroke','#ff6666'); c.setAttribute('stroke-width','2');
+    const c=document.createElementNS(SVG_NS,'circle'); c.setAttribute('cx',p.x); c.setAttribute('cy',p.y); c.setAttribute('r',r); c.setAttribute('fill','rgba(255,80,80,.15)'); c.setAttribute('stroke','#ff6666'); c.setAttribute('stroke-width','2');
     svg.append(c);
   }
-  ['p0','p1','p2'].forEach((k,i)=>{const p=st[k]; if(!p)return; const c=document.createElementNS('http://www.w3.org/2000/svg','circle'); c.setAttribute('cx',p.x); c.setAttribute('cy',p.y); c.setAttribute('r',6); c.setAttribute('fill',['#fff','#8f8','#88f'][i]); svg.append(c);});
+  ['p0','p1','p2'].forEach((k,i)=>{const p=st[k]; if(!p)return; const c=document.createElementNS(SVG_NS,'circle'); c.setAttribute('cx',p.x); c.setAttribute('cy',p.y); c.setAttribute('r',6); c.setAttribute('fill',['#fff','#8f8','#88f'][i]); svg.append(c);});
 }
 function pixelsToMeters(){ if(!st.p1||!st.p2) return 1; const d=Math.hypot(st.p2.x-st.p1.x,st.p2.y-st.p1.y); return Number($('dist').value||1000)/Math.max(1,d); }
 function pixelToWorld(px,py){ if(!st.calOk) return null; const x0=Number($('x0').value||0),y0=Number($('y0').value||0); const mpp=pixelsToMeters(); const ux=(st.p2.x-st.p1.x)/Math.hypot(st.p2.x-st.p1.x,st.p2.y-st.p1.y); const uy=(st.p2.y-st.p1.y)/Math.hypot(st.p2.x-st.p1.x,st.p2.y-st.p1.y); const wx=px-st.p1.x, wy=py-st.p1.y; const lx=(wx*ux+wy*uy)*mpp; const ly=(-wx*uy+wy*ux)*mpp; const l0x=((st.p0.x-st.p1.x)*ux+(st.p0.y-st.p1.y)*uy)*mpp; const l0y=(-(st.p0.x-st.p1.x)*uy+(st.p0.y-st.p1.y)*ux)*mpp; return {x_m:x0+(lx-l0x),y_m:y0+(ly-l0y)}; }
 function worldToPixel(xm,ym){ if(!st.calOk) return null; const x0=Number($('x0').value||0),y0=Number($('y0').value||0); const mpp=pixelsToMeters(); const ux=(st.p2.x-st.p1.x)/Math.hypot(st.p2.x-st.p1.x,st.p2.y-st.p1.y); const uy=(st.p2.y-st.p1.y)/Math.hypot(st.p2.x-st.p1.x,st.p2.y-st.p1.y); const l0x=((st.p0.x-st.p1.x)*ux+(st.p0.y-st.p1.y)*uy)*mpp; const l0y=(-(st.p0.x-st.p1.x)*uy+(st.p0.y-st.p1.y)*ux)*mpp; const tx=(xm-x0)+l0x, ty=(ym-y0)+l0y; const px=tx/mpp, py=ty/mpp; return {x:st.p1.x + px*ux - py*uy, y:st.p1.y + px*uy + py*ux}; }
+function pointerToImage(e){const img=$('mapImg');const rect=img.getBoundingClientRect();const x=e.clientX-rect.left,y=e.clientY-rect.top;if(x<0||y<0||x>st.w||y>st.h)return null;return {x,y};}
+function findMarkerNear(x,y,rad=18){for(const [k,m] of st.markers){if(Math.hypot(m.x-x,m.y-y)<=rad) return [k,m];}return null;}
+function addRuler(owner, p1, p2){const w1=pixelToWorld(p1.x,p1.y), w2=pixelToWorld(p2.x,p2.y);if(!w1||!w2) return;const dE=w2.x_m-w1.x_m,dN=w2.y_m-w1.y_m;const dist=Math.hypot(dE,dN);const mil=bearingMilFromEN(dE,dN);const deg=bearingDegFromEN(dE,dN);const text=`${deg.toFixed(1)}° | ${mil.toFixed(1)} mil | ${dist.toFixed(0)} м`;st.rulers=st.rulers.filter(r=>r.owner!==owner);st.rulers.push({owner,x1:p1.x,y1:p1.y,x2:p2.x,y2:p2.y,text,mil,dist});}
 $('imgfile').onchange=(e)=>{const f=e.target.files?.[0]; if(!f) return; const url=URL.createObjectURL(f); const img=$('mapImg'); img.onload=()=>{st.w=img.naturalWidth;st.h=img.naturalHeight;$('overlay').style.width=st.w+'px';$('overlay').style.height=st.h+'px';reset();}; img.src=url;};
-$('mapWrap').onclick=async(e)=>{ const img=$('mapImg'); if(!img.src) return; const rect=img.getBoundingClientRect(); const x=e.clientX-rect.left, y=e.clientY-rect.top; if(x<0||y<0||x>st.w||y>st.h) return; if($('mode').value==='cal'){ if(!st.p0) st.p0={x,y}; else if(!st.p1) st.p1={x,y}; else st.p2={x,y}; st.calOk=Boolean(st.p0&&st.p1&&st.p2); if(st.calOk) setStatus('Калибровка: OK'); draw(); return; } if(!st.calOk) return; const dest=$('dest').value; st.markers.set(dest,{x,y}); const xy=pixelToWorld(x,y); if(xy){ await post('/api/set_point',{dest,x_m:xy.x_m,y_m:xy.y_m,label:dest}); await post('/api/click',{x_m:xy.x_m,y_m:xy.y_m,dest,note:dest}); } draw(); };
+$('mapWrap').addEventListener('contextmenu',e=>e.preventDefault());
+$('mapWrap').onmousedown=(e)=>{if(e.button!==2 || !st.calOk) return;const p=pointerToImage(e);if(!p) return;const hit=findMarkerNear(p.x,p.y);if(!hit) return;const [dest,m]=hit; if(!(dest.startsWith('gun')||dest==='observer'||dest==='drone')) return; st.drag={dest,start:{x:m.x,y:m.y}}; addRuler(dest,st.drag.start,p); draw();};
+$('mapWrap').onmousemove=(e)=>{if(!st.drag) return;const p=pointerToImage(e);if(!p) return;addRuler(st.drag.dest,st.drag.start,p);draw();};
+$('mapWrap').onmouseup=async(e)=>{if(!st.drag) return;const p=pointerToImage(e);if(p){addRuler(st.drag.dest,st.drag.start,p); const r=st.rulers.find(x=>x.owner===st.drag.dest); if(r){st.views[st.drag.dest]={...(st.views[st.drag.dest]||{}),heading_mil:r.mil,range_m:r.dist}; await post('/api/view_config',{dest:st.drag.dest,heading_mil:r.mil,range_m:r.dist}); if(st.drag.dest.startsWith('gun')) await post('/api/gun_config',{gun_id:st.drag.dest,heading_mil:r.mil});}} st.drag=null; draw();};
+$('mapWrap').onclick=async(e)=>{ const p=pointerToImage(e); if(!p || e.button===2) return; if($('mode').value==='cal'){ if(!st.p0) st.p0={x:p.x,y:p.y}; else if(!st.p1) st.p1={x:p.x,y:p.y}; else st.p2={x:p.x,y:p.y}; st.calOk=Boolean(st.p0&&st.p1&&st.p2); if(st.calOk) setStatus('Калибровка: OK'); draw(); return; } if(!st.calOk) return; const dest=$('dest').value; st.markers.set(dest,{x:p.x,y:p.y,label:dest}); const xy=pixelToWorld(p.x,p.y); if(xy){ await post('/api/set_point',{dest,x_m:xy.x_m,y_m:xy.y_m,label:dest}); await post('/api/click',{x_m:xy.x_m,y_m:xy.y_m,dest,note:dest}); } draw(); };
 $('clear').onclick=reset;
 $('save').onclick=async()=>{ if(!st.calOk) return; await post('/api/cal_status',{ok:true,details:'saved'}); setStatus('Калибровка: OK (saved)'); };
-async function sync(){ const res=await getJson('/api/state'); if(!res||!res.ok) return; st.nfa=Array.isArray(res.nfa_zones)?res.nfa_zones:[]; st.knownPoints = (res.known_points&&typeof res.known_points==='object') ? res.known_points : {}; for(const [d,p] of Object.entries(res.points||{})){ if(typeof p.x_m!=='number') continue; const pp=worldToPixel(p.x_m,p.y_m); if(pp) st.markers.set(d,pp); } draw(); }
+async function sync(){ const res=await getJson('/api/state'); if(!res||!res.ok) return; st.nfa=Array.isArray(res.nfa_zones)?res.nfa_zones:[]; st.knownPoints = (res.known_points&&typeof res.known_points==='object') ? res.known_points : {}; st.guns=(res.guns&&typeof res.guns==='object')?res.guns:{}; st.views=(res.views&&typeof res.views==='object')?res.views:{};
+  const points=(res.points&&typeof res.points==='object')?res.points:{};
+  st.markers.clear();
+  for(const [d,p] of Object.entries(points)){ if(typeof p.x_m!=='number') continue; const pp=worldToPixel(p.x_m,p.y_m); if(!pp) continue; const isGun=d.startsWith('gun'); if(isGun && !st.guns[d]) continue; if((d==='observer'||d==='drone')||isGun||d==='target'){ st.markers.set(d,{...pp,label:String(p.label||d)}); }}
+  draw(); }
 setInterval(sync,1000);
 </script>
 </body>
