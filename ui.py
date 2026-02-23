@@ -2,7 +2,7 @@ import os, sys, math, re, traceback, json, socket, subprocess, threading, urllib
 
 import webbrowser
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QShortcut, QKeySequence
@@ -18,7 +18,7 @@ from utils import (
 )
 from models import SolveRequest
 from solver import suggest_best
-from weapon import Weapon
+from weapon import Weapon, DEFAULT_WEAPON_CATALOG
 from table_cache import TableManager
 
 from map_view import TacticalMapView, compute_similarity
@@ -104,6 +104,10 @@ class MainWindow(QMainWindow):
         self.weapon = Weapon()
         self.tables = TableManager()
         self.guns: List[GunInputs] = []
+        self.battery_count = 5
+        self.max_guns_per_battery = 5
+        self.battery_guns_count: Dict[int, int] = {i: 5 for i in range(1, 6)}
+        self.current_battery = 1
         self._net_lock = threading.Lock()
         self._web_poll_busy = False
         self._status_ping_busy = False
@@ -165,11 +169,12 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("F2"), self, activated=lambda: (self.mode.setCurrentText("Навесной"), self.arc.setCurrentText("НИЗКАЯ")))
         QShortcut(QKeySequence("F3"), self, activated=lambda: (self.mode.setCurrentText("Навесной"), self.arc.setCurrentText("ВЫСОКАЯ")))
 
-        # load tables
-        self.load_tables(show_popup=False)
+        # load selected ballistic tables
+        self._load_selected_profile_tables()
 
         # restore state
         self._restore_state()
+        self._on_battery_changed()
 
     # --- BUILD TABS ---
 
@@ -258,9 +263,15 @@ class MainWindow(QMainWindow):
 
         self.mode = QComboBox(); self.mode.addItems(["Прямой", "Навесной"])
         self.arc = QComboBox(); self.arc.addItems(["НИЗКАЯ", "ВЫСОКАЯ"])
-        self.weapon_name = QLineEdit("Default")
+        self.weapon_name = QComboBox()
+        self.weapon_name.addItems([p.name for p in DEFAULT_WEAPON_CATALOG.values()])
+        self.projectile_name = QComboBox()
+        self._refresh_projectiles_for_weapon()
+        self.weapon_name.currentIndexChanged.connect(self._refresh_projectiles_for_weapon)
+        self.projectile_name.currentIndexChanged.connect(self._load_selected_profile_tables)
 
         gun_form.addRow("Профиль", self.weapon_name)
+        gun_form.addRow("Снаряд", self.projectile_name)
         gun_form.addRow("Режим", self.mode)
         gun_form.addRow("Траектория", self.arc)
 
@@ -270,21 +281,35 @@ class MainWindow(QMainWindow):
     def _build_settings_tab(self):
         lay = QVBoxLayout(self.tab_settings)
 
+        org_box = QGroupBox("Батареи")
+        org_form = QFormLayout(org_box)
+        self.battery_select = QComboBox(); self.battery_select.addItems([f"Батарея {i}" for i in range(1, 6)])
+        self.guns_in_battery = QComboBox(); self.guns_in_battery.addItems([str(i) for i in range(1, 6)])
+        self.guns_in_battery.setCurrentText("5")
+        org_form.addRow("Активная батарея", self.battery_select)
+        org_form.addRow("Орудий в батарее", self.guns_in_battery)
+        lay.addWidget(org_box)
+
+        self.battery_select.currentIndexChanged.connect(self._on_battery_changed)
+        self.guns_in_battery.currentTextChanged.connect(self._on_guns_count_changed)
+
         calc_box = QGroupBox("Координаты")
         form = QFormLayout(calc_box)
 
-        self.tx, self.ty = QLineEdit(), QLineEdit()
+        self.tx, self.ty, self.tz = QLineEdit(), QLineEdit(), QLineEdit("0")
         self.ox, self.oy = QLineEdit(), QLineEdit()
         self.dx, self.dy = QLineEdit(), QLineEdit()
 
         self.tx.setPlaceholderText("X цели")
         self.ty.setPlaceholderText("Y цели")
+        self.tz.setPlaceholderText("H цели")
         self.ox.setPlaceholderText("X наблюдателя")
         self.oy.setPlaceholderText("Y наблюдателя")
         self.dx.setPlaceholderText("X дрона")
         self.dy.setPlaceholderText("Y дрона")
 
         row_t = QWidget(); row_t_l = QHBoxLayout(row_t); row_t_l.setContentsMargins(0, 0, 0, 0); row_t_l.addWidget(self.tx); row_t_l.addWidget(self.ty)
+        row_t_l.addWidget(self.tz)
         row_o = QWidget(); row_o_l = QHBoxLayout(row_o); row_o_l.setContentsMargins(0, 0, 0, 0); row_o_l.addWidget(self.ox); row_o_l.addWidget(self.oy)
         row_d = QWidget(); row_d_l = QHBoxLayout(row_d); row_d_l.setContentsMargins(0, 0, 0, 0); row_d_l.addWidget(self.dx); row_d_l.addWidget(self.dy)
 
@@ -292,10 +317,82 @@ class MainWindow(QMainWindow):
         form.addRow("Наблюдатель", row_o)
         form.addRow("Дрон", row_d)
 
+        guns_box = QGroupBox("Орудия активной батареи")
+        guns_form = QFormLayout(guns_box)
+        self.guns.clear()
+        for idx in range(1, 6):
+            gx = QLineEdit(); gy = QLineEdit(); gh = QLineEdit("0")
+            gx.setPlaceholderText(f"X{idx}")
+            gy.setPlaceholderText(f"Y{idx}")
+            gh.setPlaceholderText(f"H{idx}")
+            row = QWidget()
+            row_l = QHBoxLayout(row)
+            row_l.setContentsMargins(0, 0, 0, 0)
+            row_l.addWidget(gx); row_l.addWidget(gy); row_l.addWidget(gh)
+            guns_form.addRow(f"Орудие {idx}", row)
+            self.guns.append(GunInputs(x=gx, y=gy, h=gh, label=f"gun{idx}"))
+
         self.lock_guns = QCheckBox("Блокировать автозаполнение орудий")
         lay.addWidget(calc_box)
+        lay.addWidget(guns_box)
         lay.addWidget(self.lock_guns)
+        self.btn_compute = QPushButton("Рассчитать для батареи")
+        self.btn_compute.clicked.connect(self.compute_selected)
+        lay.addWidget(self.btn_compute)
         lay.addStretch(1)
+
+
+    def _active_weapon_key(self) -> str:
+        keys = list(DEFAULT_WEAPON_CATALOG.keys())
+        idx = max(0, self.weapon_name.currentIndex())
+        return keys[min(idx, len(keys)-1)]
+
+    def _refresh_projectiles_for_weapon(self):
+        if not hasattr(self, "projectile_name"):
+            return
+        profile = DEFAULT_WEAPON_CATALOG[self._active_weapon_key()]
+        self.projectile_name.blockSignals(True)
+        self.projectile_name.clear()
+        self.projectile_name.addItems([p.name for p in profile.projectiles])
+        self.projectile_name.blockSignals(False)
+        self._load_selected_profile_tables()
+
+    def _load_selected_profile_tables(self):
+        profile = DEFAULT_WEAPON_CATALOG[self._active_weapon_key()]
+        pidx = max(0, self.projectile_name.currentIndex()) if hasattr(self, "projectile_name") else 0
+        projectile = profile.projectiles[min(pidx, len(profile.projectiles)-1)]
+        tables_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), projectile.table_folder)
+        try:
+            self.tables.load_folder(tables_dir)
+            self.status.setText(f"Профиль: {profile.name} / {projectile.name}")
+        except Exception as e:
+            self.status.setText(f"Таблицы не загружены: {e}")
+
+    def _on_battery_changed(self):
+        self.current_battery = self.battery_select.currentIndex() + 1
+        count = self.battery_guns_count.get(self.current_battery, 5)
+        self.guns_in_battery.blockSignals(True)
+        self.guns_in_battery.setCurrentText(str(count))
+        self.guns_in_battery.blockSignals(False)
+        self._refresh_gun_rows_enabled()
+
+    def _on_guns_count_changed(self):
+        self.battery_guns_count[self.current_battery] = max(1, int(self.guns_in_battery.currentText() or "1"))
+        self._refresh_gun_rows_enabled()
+
+    def _refresh_gun_rows_enabled(self):
+        count = self.battery_guns_count.get(self.current_battery, 5)
+        for idx, g in enumerate(self.guns, start=1):
+            enabled = idx <= count
+            g.x.setEnabled(enabled)
+            g.y.setEnabled(enabled)
+            g.h.setEnabled(enabled)
+
+    def _clear_gun(self, idx: int):
+        if 0 <= idx < len(self.guns):
+            self.guns[idx].x.setText("")
+            self.guns[idx].y.setText("")
+            self.guns[idx].h.setText("0")
 
     # --- Minimal fallbacks ---
 
@@ -318,17 +415,42 @@ class MainWindow(QMainWindow):
             return
         if not isinstance(state, dict):
             return
-        for name in ("tx", "ty", "ox", "oy", "dx", "dy"):
+        for name in ("tx", "ty", "tz", "ox", "oy", "dx", "dy"):
             w = getattr(self, name, None)
             if w is not None and name in state:
                 w.setText(str(state.get(name, "")))
+        if "battery" in state:
+            self.battery_select.setCurrentIndex(max(0, min(4, int(state.get("battery", 1)) - 1)))
+        for b in range(1, 6):
+            k = f"battery_{b}_count"
+            if k in state:
+                self.battery_guns_count[b] = max(1, min(5, int(state.get(k, 5))))
+        guns_state = state.get("guns", {}) if isinstance(state.get("guns", {}), dict) else {}
+        for b in range(1, 6):
+            rows = guns_state.get(str(b), [])
+            if not isinstance(rows, list):
+                continue
+            if b == self.current_battery:
+                for idx, row in enumerate(rows[:5]):
+                    if idx >= len(self.guns):
+                        break
+                    self.guns[idx].x.setText(str(row.get("x", "")))
+                    self.guns[idx].y.setText(str(row.get("y", "")))
+                    self.guns[idx].h.setText(str(row.get("h", "0")))
 
     def _save_state(self):
         payload = {}
-        for name in ("tx", "ty", "ox", "oy", "dx", "dy"):
+        for name in ("tx", "ty", "tz", "ox", "oy", "dx", "dy"):
             w = getattr(self, name, None)
             if w is not None:
                 payload[name] = w.text().strip()
+        payload["battery"] = self.current_battery
+        for b in range(1, 6):
+            payload[f"battery_{b}_count"] = self.battery_guns_count.get(b, 5)
+        payload["guns"] = {str(self.current_battery): [
+            {"x": g.x.text().strip(), "y": g.y.text().strip(), "h": g.h.text().strip() or "0"}
+            for g in self.guns
+        ]}
         try:
             save_state(payload)
         except Exception:
@@ -349,45 +471,60 @@ class MainWindow(QMainWindow):
     def compute_selected(self):
         self._save_state()
         try:
-            gun = Point2D(self._parse_coord_field(self.ox, "Орудие X"), self._parse_coord_field(self.oy, "Орудие Y"))
             target = Point2D(self._parse_coord_field(self.tx, "Цель X"), self._parse_coord_field(self.ty, "Цель Y"))
-
-            dist = distance_2d(gun, target)
-            bearing = bearing_rad_from_north(gun, target)
-            az_mil = rad_to_mil(bearing)
-            az_deg = mil_to_deg(az_mil)
+            target_h = parse_float(self.tz.text(), 0.0)
 
             wind_speed = parse_float(self.wind_speed.text(), 0.0)
             if self.wind_unit.currentText() == "км/ч":
                 wind_speed /= 3.6
             wind_dir = parse_float(self.wind_dir.text(), 0.0)
-            wx, wy = wind_components_from_speed_dir(wind_speed, wind_dir)
-            wind_ff = rotate_world_to_fireframe(wx, wy, bearing)
 
-            req = SolveRequest(
-                target_x_m=float(dist),
-                target_y_m=0.0,
-                target_z_m=0.0,
-                wind_ff=wind_ff,
-                arc="LOW" if self.arc.currentText() == "НИЗКАЯ" else "HIGH",
-                direct_fire=(self.mode.currentText() == "Прямой"),
-                tolerance_m=8.0,
-                dt=0.02,
-            )
-            best = suggest_best(req, self.weapon, self.tables)
-            if best is None:
-                raise RuntimeError("Не удалось подобрать решение для выбранного режима.")
+            count = self.battery_guns_count.get(self.current_battery, 5)
+            lines = [f"Батарея {self.current_battery} · орудий: {count}"]
+            best_line = None
+            for idx, gun in enumerate(self.guns[:count], start=1):
+                gx = (gun.x.text() or "").strip()
+                gy = (gun.y.text() or "").strip()
+                if not gx or not gy:
+                    continue
+                gun_pt = Point2D(self._parse_coord_field(gun.x, f"Орудие {idx} X"), self._parse_coord_field(gun.y, f"Орудие {idx} Y"))
+                gun_h = parse_float(gun.h.text(), 0.0)
+                dist = distance_2d(gun_pt, target)
+                bearing = bearing_rad_from_north(gun_pt, target)
+                az_mil = rad_to_mil(bearing)
+                wx, wy = wind_components_from_speed_dir(wind_speed, wind_dir)
+                wind_ff = rotate_world_to_fireframe(wx, wy, bearing)
+                req = SolveRequest(
+                    target_x_m=float(dist),
+                    target_y_m=float(target_h - gun_h),
+                    target_z_m=0.0,
+                    wind_ff=wind_ff,
+                    arc="LOW" if self.arc.currentText() == "НИЗКАЯ" else "HIGH",
+                    direct_fire=(self.mode.currentText() == "Прямой"),
+                    tolerance_m=8.0,
+                    dt=0.02,
+                )
+                best = suggest_best(req, self.weapon, self.tables)
+                if best is None:
+                    lines.append(f"Орудие {idx}: решение не найдено")
+                    continue
+                lines.append(
+                    f"Орудие {idx}: AZ {az_mil:.1f} mil | Заряд {best.charge} | УВН {best.elev_mil:.1f} mil | TOF {best.tof:.1f} c"
+                )
+                if best_line is None:
+                    best_line = f"Орудие {idx}: AZ {az_mil:.1f} mil / УВН {best.elev_mil:.1f} mil"
 
-            summary = (
-                f"Дист: {dist:.0f} м | Азимут: {az_mil:.1f} mil ({az_deg:.1f}°){NL}"
-                f"Заряд: {best.charge} | УВН: {best.elev_mil:.1f} mil | TOF: {best.tof:.1f} c{NL}"
-                f"Промах(оценка): {best.miss_total_m:.1f} м"
-            )
-            self.status.setText(f"Готово: {self.mode.currentText()} / {self.arc.currentText()}")
+            if len(lines) == 1:
+                raise RuntimeError("Нет введённых координат орудий в активной батарее.")
+
+            summary = NL.join(lines)
+            self.status.setText(f"Готово: батарея {self.current_battery}")
             self.out.setText(summary.replace(NL, " | "))
             self.sol_win.set_text(summary)
             self.sol_win.show()
             self.progress.setValue(100)
+            if best_line:
+                self.lbl_server_status.setText(best_line)
         except Exception as e:
             self.status.setText(f"Ошибка расчёта: {e}")
             self.progress.setValue(0)
@@ -516,9 +653,12 @@ class MainWindow(QMainWindow):
                 if not req_base.endswith("/"):
                     req_base += "/"
                 try:
-                    payload = http_get_json(req_base + "api/last_click", timeout=0.2)
-                    if payload is None:
+                    click = http_get_json(req_base + "api/last_click", timeout=0.2)
+                    state = http_get_json(req_base + "api/state", timeout=0.2)
+                    if click is None and state is None:
                         payload = {"offline": True}
+                    else:
+                        payload = {"last_click": click or {}, "state": state or {}}
                 except Exception:
                     payload = {"offline": True}
             with self._net_lock:
@@ -539,17 +679,22 @@ class MainWindow(QMainWindow):
                 self.web_status.setText("offline")
             return
 
+        click = r.get("last_click", r) if isinstance(r, dict) else {}
+        state = r.get("state", {}) if isinstance(r, dict) else {}
+
+        self._sync_guns_with_server_state(state)
+
         ts = 0.0
         try:
-            ts = float(r.get("ts", 0.0))
+            ts = float(click.get("ts", 0.0))
         except Exception:
             ts = 0.0
         if ts <= getattr(self, "_web_last_ts", 0.0):
             return
         self._web_last_ts = ts
 
-        x = r.get("x_m", None); y = r.get("y_m", None)
-        dest = (r.get("dest","") or "").strip().lower()
+        x = click.get("x_m", None); y = click.get("y_m", None)
+        dest = (click.get("dest","") or "").strip().lower()
         if x is None or y is None or not dest:
             return
         try:
@@ -566,6 +711,26 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, "web_auto") and self.web_auto.isChecked():
             self._web_apply_dest(dest, x, y)
+
+    def _sync_guns_with_server_state(self, state_payload: dict):
+        points = state_payload.get("points", {}) if isinstance(state_payload, dict) else {}
+        known = set(points.keys())
+        for idx in range(1, 6):
+            dest = f"gun{idx}"
+            if dest in known:
+                p = points.get(dest) or {}
+                try:
+                    x = float(p.get("x_m"))
+                    y = float(p.get("y_m"))
+                except Exception:
+                    continue
+                if hasattr(self, "lock_guns") and self.lock_guns.isChecked():
+                    continue
+                if idx - 1 < len(self.guns):
+                    self.guns[idx - 1].x.setText(str(int(round(x))))
+                    self.guns[idx - 1].y.setText(str(int(round(y))))
+            else:
+                self._clear_gun(idx - 1)
 
     def _web_apply_dest(self, dest: str, x_m: float, y_m: float):
         def set_xy(le_x, le_y):
