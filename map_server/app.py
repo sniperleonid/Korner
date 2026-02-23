@@ -29,6 +29,7 @@ app.add_middleware(
 
 BASE = Path(__file__).resolve().parent
 CAL_STORE_FILE = BASE / "calibrations.json"
+STATE_FILE = BASE / "server_state.json"
 
 def _load_cal_store():
     try:
@@ -42,6 +43,19 @@ def _save_cal_store(store: dict):
     except Exception:
         pass
 
+def _load_state_store():
+    try:
+        payload = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+def _save_state_store(store: dict):
+    try:
+        STATE_FILE.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
 CAL_STORE = _load_cal_store()
 app.mount("/static", StaticFiles(directory=str(BASE / "static")), name="static")
 
@@ -51,7 +65,19 @@ STATE: Dict[str, Any] = {
     "last_click": {"ts": 0.0, "x_m": None, "y_m": None, "dest": "", "note": ""},
     "points": {},
     "guns": {},
+    "known_points": {},
+    "nfa_zones": [],
 }
+
+STATE.update({k:v for k,v in _load_state_store().items() if k in ("points","guns","known_points","nfa_zones")})
+
+def _persist_state():
+    _save_state_store({
+        "points": STATE.get("points", {}),
+        "guns": STATE.get("guns", {}),
+        "known_points": STATE.get("known_points", {}),
+        "nfa_zones": STATE.get("nfa_zones", []),
+    })
 
 class ClickIn(BaseModel):
     x_m: float
@@ -87,6 +113,7 @@ def api_click(data: ClickIn):
     STATE["last_click"] = {"ts": now, "x_m": float(data.x_m), "y_m": float(data.y_m), "dest": data.dest, "note": data.note}
     if data.dest:
         STATE["points"][data.dest] = {"x_m": float(data.x_m), "y_m": float(data.y_m), "ts": now, "label": data.note or data.dest}
+    _persist_state()
     return {"ok": True}
 
 @app.get("/api/last_click")
@@ -99,18 +126,65 @@ def api_set_point(p: PointIn):
     STATE["ts"] = now
     STATE["points"][p.dest] = {"x_m": float(p.x_m), "y_m": float(p.y_m), "ts": now, "label": p.label or p.dest}
     STATE["last_click"] = {"ts": now, "x_m": float(p.x_m), "y_m": float(p.y_m), "dest": p.dest, "note": p.label or p.dest}
+    _persist_state()
     return {"ok": True}
 
 class DeletePointIn(BaseModel):
     dest: str
+
+class KnownPointIn(BaseModel):
+    name: str
+    x_m: float
+    y_m: float
+    note: str = ""
+
+class DeleteKnownPointIn(BaseModel):
+    name: str
+
+class NFAZonesIn(BaseModel):
+    zones: list
 
 @app.post("/api/delete_point")
 def api_delete_point(p: DeletePointIn):
     if p.dest in STATE["points"]:
         del STATE["points"][p.dest]
         STATE["ts"] = time.time()
+        _persist_state()
     return {"ok": True}
 
+
+@app.post("/api/set_known_point")
+def api_set_known_point(p: KnownPointIn):
+    STATE["known_points"][p.name] = {"x_m": float(p.x_m), "y_m": float(p.y_m), "note": p.note}
+    STATE["ts"] = time.time()
+    _persist_state()
+    return {"ok": True}
+
+@app.post("/api/delete_known_point")
+def api_delete_known_point(p: DeleteKnownPointIn):
+    if p.name in STATE["known_points"]:
+        del STATE["known_points"][p.name]
+        STATE["ts"] = time.time()
+        _persist_state()
+    return {"ok": True}
+
+@app.post("/api/set_nfa_zones")
+def api_set_nfa_zones(payload: NFAZonesIn):
+    STATE["nfa_zones"] = payload.zones
+    STATE["ts"] = time.time()
+    _persist_state()
+    return {"ok": True}
+
+@app.post("/api/reset_runtime_data")
+def api_reset_runtime_data():
+    STATE["points"] = {}
+    STATE["guns"] = {}
+    STATE["known_points"] = {}
+    STATE["nfa_zones"] = []
+    STATE["last_click"] = {"ts": 0.0, "x_m": None, "y_m": None, "dest": "", "note": ""}
+    STATE["ts"] = time.time()
+    _persist_state()
+    return {"ok": True}
 
 @app.post("/api/gun_config")
 def api_gun_config(cfg: GunCfgIn):
@@ -121,6 +195,7 @@ def api_gun_config(cfg: GunCfgIn):
     if cfg.max_range is not None: g["max_range"] = float(cfg.max_range)
     STATE["guns"][cfg.gun_id] = g
     STATE["ts"] = time.time()
+    _persist_state()
     return {"ok": True, "gun": g}
 
 @app.post("/api/cal_status")

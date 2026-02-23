@@ -9,7 +9,7 @@ from PySide6.QtGui import QShortcut, QKeySequence
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QGroupBox, QFormLayout,
     QLineEdit, QPushButton, QLabel, QComboBox, QProgressBar, QCheckBox, QMessageBox,
-    QFileDialog, QTabWidget, QSplitter
+    QFileDialog, QTabWidget, QSplitter, QListWidget
 )
 
 from utils import (
@@ -113,6 +113,9 @@ class MainWindow(QMainWindow):
         self._status_ping_busy = False
         self._pending_web_payload = None
         self._pending_server_online = None
+        self.nfa_zones: List[dict] = []
+        self.known_points: Dict[str, dict] = {}
+        self.fire_history: List[str] = []
 
         self.sol_win = SolutionWindow(self)
 
@@ -149,18 +152,21 @@ class MainWindow(QMainWindow):
         # --- Tabs ---
         self.tab_tactical = QWidget()
         self.tab_env = QWidget()
-        self.tab_weapons = QWidget()
-        self.tab_settings = QWidget()
+        self.tab_fire = QWidget()
+        self.tab_config = QWidget()
+        self.tab_safety = QWidget()
 
         self.tabs.addTab(self.tab_tactical, "Тактика")
         self.tabs.addTab(self.tab_env, "Погода / ACE")
-        self.tabs.addTab(self.tab_weapons, "Орудия / профили")
-        self.tabs.addTab(self.tab_settings, "Настройки")
+        self.tabs.addTab(self.tab_fire, "Fire Missions")
+        self.tabs.addTab(self.tab_config, "Configuration")
+        self.tabs.addTab(self.tab_safety, "Safety & Data")
 
         self._build_tactical_tab()
         self._build_env_tab()
-        self._build_weapons_tab()
-        self._build_settings_tab()
+        self._build_fire_tab()
+        self._build_config_tab()
+        self._build_safety_tab()
 
         # hotkeys
         QShortcut(QKeySequence("Return"), self, activated=self.compute_selected)
@@ -255,8 +261,8 @@ class MainWindow(QMainWindow):
         lay.addWidget(box)
         lay.addStretch(1)
 
-    def _build_weapons_tab(self):
-        lay = QVBoxLayout(self.tab_weapons)
+    def _build_fire_tab(self):
+        lay = QVBoxLayout(self.tab_fire)
 
         gun_box = QGroupBox("Орудие")
         gun_form = QFormLayout(gun_box)
@@ -276,10 +282,33 @@ class MainWindow(QMainWindow):
         gun_form.addRow("Траектория", self.arc)
 
         lay.addWidget(gun_box)
+        # mission settings
+        mission_box = QGroupBox("Огневые решения / CFF")
+        mission_form = QFormLayout(mission_box)
+        self.mission_mode = QComboBox(); self.mission_mode.addItems(["По сетке", "От наблюдателя/дрона", "От известных точек", "Polar Plot"])
+        self.sheaf_type = QComboBox(); self.sheaf_type.addItems(["Линейный", "Параллельный", "Схождение", "Круговой", "Открытый"])
+        self.obs_az = QLineEdit("0")
+        self.obs_angle = QLineEdit("0")
+        self.drone_alt = QLineEdit("0")
+        mission_form.addRow("Режим миссии", self.mission_mode)
+        mission_form.addRow("Тип снопа", self.sheaf_type)
+        mission_form.addRow("Азимут наблюдателя", self.obs_az)
+        mission_form.addRow("Угол/вертикаль", self.obs_angle)
+        mission_form.addRow("Высота дрона", self.drone_alt)
+        lay.addWidget(mission_box)
+
+        hist_box = QGroupBox("История огня (10)")
+        hist_lay = QVBoxLayout(hist_box)
+        self.mission_history = QListWidget()
+        self.btn_clear_history = QPushButton("Очистить историю")
+        self.btn_clear_history.clicked.connect(self._clear_mission_history)
+        hist_lay.addWidget(self.mission_history)
+        hist_lay.addWidget(self.btn_clear_history)
+        lay.addWidget(hist_box)
         lay.addStretch(1)
 
-    def _build_settings_tab(self):
-        lay = QVBoxLayout(self.tab_settings)
+    def _build_config_tab(self):
+        lay = QVBoxLayout(self.tab_config)
 
         org_box = QGroupBox("Батареи")
         org_form = QFormLayout(org_box)
@@ -333,14 +362,66 @@ class MainWindow(QMainWindow):
             self.guns.append(GunInputs(x=gx, y=gy, h=gh, label=f"gun{idx}"))
 
         self.lock_guns = QCheckBox("Блокировать автозаполнение орудий")
+
+        kp_box = QGroupBox("Известные точки")
+        kp_lay = QVBoxLayout(kp_box)
+        self.known_points_list = QListWidget()
+        self.known_point_name = QLineEdit(); self.known_point_name.setPlaceholderText("Название точки")
+        self.btn_save_known_target = QPushButton("Сохранить текущую цель")
+        self.btn_save_known_target.clicked.connect(self._save_current_target_as_known_point)
+        self.btn_use_known_target = QPushButton("Выбрать как цель")
+        self.btn_use_known_target.clicked.connect(self._apply_selected_known_point)
+        kp_lay.addWidget(self.known_points_list)
+        kp_lay.addWidget(self.known_point_name)
+        kp_lay.addWidget(self.btn_save_known_target)
+        kp_lay.addWidget(self.btn_use_known_target)
+
+        corr_box = QGroupBox("Окно корректировок")
+        corr_form = QFormLayout(corr_box)
+        self.corr_lr = QLineEdit("0")
+        self.corr_ad = QLineEdit("0")
+        self.corr_ref = QComboBox(); self.corr_ref.addItems(["От наблюдателя", "От орудия"])
+        corr_form.addRow("Влево/вправо (м)", self.corr_lr)
+        corr_form.addRow("Добавить/убавить (м)", self.corr_ad)
+        corr_form.addRow("Система отсчета", self.corr_ref)
+
         lay.addWidget(calc_box)
         lay.addWidget(guns_box)
         lay.addWidget(self.lock_guns)
+        lay.addWidget(kp_box)
+        lay.addWidget(corr_box)
         self.btn_compute = QPushButton("Рассчитать для батареи")
         self.btn_compute.clicked.connect(self.compute_selected)
         lay.addWidget(self.btn_compute)
         lay.addStretch(1)
 
+    def _build_safety_tab(self):
+        lay = QVBoxLayout(self.tab_safety)
+        nfa_box = QGroupBox("No Fire Areas (NFA)")
+        nfa_form = QFormLayout(nfa_box)
+        self.nfa_x = QLineEdit(); self.nfa_y = QLineEdit(); self.nfa_r = QLineEdit("150")
+        self.nfa_list = QListWidget()
+        self.cancel_on_nfa = QCheckBox("Отменять выстрел для орудия, если траектория пересекает NFA")
+        self.cancel_on_nfa.setChecked(True)
+        self.btn_add_nfa = QPushButton("Добавить NFA")
+        self.btn_remove_nfa = QPushButton("Удалить выбранную NFA")
+        self.btn_add_nfa.clicked.connect(self._add_nfa_zone)
+        self.btn_remove_nfa.clicked.connect(self._remove_selected_nfa_zone)
+        row = QWidget(); row_l = QHBoxLayout(row); row_l.setContentsMargins(0,0,0,0); row_l.addWidget(self.nfa_x); row_l.addWidget(self.nfa_y); row_l.addWidget(self.nfa_r)
+        nfa_form.addRow("X/Y/R", row)
+        nfa_form.addRow(self.btn_add_nfa, self.btn_remove_nfa)
+        nfa_form.addRow(self.cancel_on_nfa)
+        nfa_form.addRow(self.nfa_list)
+
+        data_box = QGroupBox("Safety & Data")
+        data_l = QVBoxLayout(data_box)
+        self.btn_reset_runtime = QPushButton("Очистить все данные (кроме таблиц)")
+        self.btn_reset_runtime.clicked.connect(self._reset_runtime_data)
+        data_l.addWidget(self.btn_reset_runtime)
+
+        lay.addWidget(nfa_box)
+        lay.addWidget(data_box)
+        lay.addStretch(1)
 
     def _active_weapon_key(self) -> str:
         keys = list(DEFAULT_WEAPON_CATALOG.keys())
@@ -437,6 +518,15 @@ class MainWindow(QMainWindow):
                     self.guns[idx].x.setText(str(row.get("x", "")))
                     self.guns[idx].y.setText(str(row.get("y", "")))
                     self.guns[idx].h.setText(str(row.get("h", "0")))
+        self.nfa_zones = state.get("nfa_zones", []) if isinstance(state.get("nfa_zones", []), list) else []
+        self.known_points = state.get("known_points", {}) if isinstance(state.get("known_points", {}), dict) else {}
+        self.fire_history = state.get("fire_history", []) if isinstance(state.get("fire_history", []), list) else []
+        if hasattr(self, "cancel_on_nfa"):
+            self.cancel_on_nfa.setChecked(bool(state.get("cancel_on_nfa", True)))
+        self._refresh_nfa_list() if hasattr(self, "nfa_list") else None
+        self._refresh_known_points_ui()
+        if hasattr(self, "mission_history"):
+            self.mission_history.clear(); self.mission_history.addItems(self.fire_history[:10])
 
     def _save_state(self):
         payload = {}
@@ -451,6 +541,10 @@ class MainWindow(QMainWindow):
             {"x": g.x.text().strip(), "y": g.y.text().strip(), "h": g.h.text().strip() or "0"}
             for g in self.guns
         ]}
+        payload["nfa_zones"] = self.nfa_zones
+        payload["known_points"] = self.known_points
+        payload["fire_history"] = self.fire_history[:10]
+        payload["cancel_on_nfa"] = self.cancel_on_nfa.isChecked() if hasattr(self, "cancel_on_nfa") else True
         try:
             save_state(payload)
         except Exception:
@@ -473,6 +567,9 @@ class MainWindow(QMainWindow):
         try:
             target = Point2D(self._parse_coord_field(self.tx, "Цель X"), self._parse_coord_field(self.ty, "Цель Y"))
             target_h = parse_float(self.tz.text(), 0.0)
+            corr_lr = parse_float(self.corr_lr.text(), 0.0) if hasattr(self, "corr_lr") else 0.0
+            corr_ad = parse_float(self.corr_ad.text(), 0.0) if hasattr(self, "corr_ad") else 0.0
+            target = Point2D(target.x + corr_lr, target.y + corr_ad)
 
             wind_speed = parse_float(self.wind_speed.text(), 0.0)
             if self.wind_unit.currentText() == "км/ч":
@@ -489,6 +586,11 @@ class MainWindow(QMainWindow):
                     continue
                 gun_pt = Point2D(self._parse_coord_field(gun.x, f"Орудие {idx} X"), self._parse_coord_field(gun.y, f"Орудие {idx} Y"))
                 gun_h = parse_float(gun.h.text(), 0.0)
+                if self._line_intersects_nfa(gun_pt, target):
+                    lines.append(f"Орудие {idx}: ⚠ траектория пересекает NFA")
+                    if self.cancel_on_nfa.isChecked():
+                        lines.append(f"Орудие {idx}: выстрел отменен (пропуск зоны)")
+                        continue
                 dist = distance_2d(gun_pt, target)
                 bearing = bearing_rad_from_north(gun_pt, target)
                 az_mil = rad_to_mil(bearing)
@@ -522,6 +624,7 @@ class MainWindow(QMainWindow):
             self.out.setText(summary.replace(NL, " | "))
             self.sol_win.set_text(summary)
             self.sol_win.show()
+            self._push_fire_history(summary)
             self.progress.setValue(100)
             if best_line:
                 self.lbl_server_status.setText(best_line)
@@ -714,6 +817,12 @@ class MainWindow(QMainWindow):
 
     def _sync_guns_with_server_state(self, state_payload: dict):
         points = state_payload.get("points", {}) if isinstance(state_payload, dict) else {}
+        self.known_points = state_payload.get("known_points", {}) if isinstance(state_payload.get("known_points", {}), dict) else self.known_points
+        nfa_payload = state_payload.get("nfa_zones", []) if isinstance(state_payload, dict) else []
+        if isinstance(nfa_payload, list):
+            self.nfa_zones = [{"x_m": float(z.get("x_m", 0)), "y_m": float(z.get("y_m", 0)), "radius_m": float(z.get("radius_m", z.get("r", 0)))} for z in nfa_payload if isinstance(z, dict)]
+            self._refresh_nfa_list()
+        self._refresh_known_points_ui()
         known = set(points.keys())
         for idx in range(1, 6):
             dest = f"gun{idx}"
@@ -751,6 +860,121 @@ class MainWindow(QMainWindow):
                 if hasattr(self, "lock_guns") and self.lock_guns.isChecked():
                     return
                 set_xy(self.guns[idx].x, self.guns[idx].y)
+
+    def _clear_mission_history(self):
+        self.fire_history = []
+        self.mission_history.clear()
+
+    def _push_fire_history(self, text: str):
+        self.fire_history.insert(0, text)
+        self.fire_history = self.fire_history[:10]
+        self.mission_history.clear()
+        self.mission_history.addItems(self.fire_history)
+
+    def _add_nfa_zone(self):
+        try:
+            x = self._parse_coord_field(self.nfa_x, "NFA X")
+            y = self._parse_coord_field(self.nfa_y, "NFA Y")
+            r = max(1.0, parse_float(self.nfa_r.text(), 150.0))
+        except Exception as e:
+            self.status.setText(f"NFA ошибка: {e}")
+            return
+        self.nfa_zones.append({"x_m": x, "y_m": y, "radius_m": r})
+        self._refresh_nfa_list()
+        self._push_nfa_to_server()
+
+    def _remove_selected_nfa_zone(self):
+        row = self.nfa_list.currentRow()
+        if 0 <= row < len(self.nfa_zones):
+            self.nfa_zones.pop(row)
+            self._refresh_nfa_list()
+            self._push_nfa_to_server()
+
+    def _refresh_nfa_list(self):
+        self.nfa_list.clear()
+        for idx, z in enumerate(self.nfa_zones, start=1):
+            self.nfa_list.addItem(f"#{idx} X={z['x_m']:.0f} Y={z['y_m']:.0f} R={z['radius_m']:.0f}")
+
+    def _line_intersects_nfa(self, a: Point2D, b: Point2D) -> bool:
+        for z in self.nfa_zones:
+            cx, cy, r = float(z.get("x_m", 0)), float(z.get("y_m", 0)), float(z.get("radius_m", 0))
+            abx = b.x - a.x
+            aby = b.y - a.y
+            if abs(abx) < 1e-6 and abs(aby) < 1e-6:
+                continue
+            t = ((cx - a.x) * abx + (cy - a.y) * aby) / max(1e-6, (abx*abx + aby*aby))
+            t = max(0.0, min(1.0, t))
+            px = a.x + t * abx
+            py = a.y + t * aby
+            if math.hypot(px - cx, py - cy) <= r:
+                return True
+        return False
+
+    def _push_nfa_to_server(self):
+        base = (self.web_url.text().strip() if hasattr(self, "web_url") else "").rstrip("/")
+        if not base:
+            return
+        try:
+            req = urllib.request.Request(base + "/api/set_nfa_zones", data=json.dumps({"zones": self.nfa_zones}).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
+            urllib.request.urlopen(req, timeout=0.4).read()
+        except Exception:
+            pass
+
+    def _save_current_target_as_known_point(self):
+        name = (self.known_point_name.text() or "").strip()
+        if not name:
+            self.status.setText("Введите имя известной точки")
+            return
+        try:
+            x = self._parse_coord_field(self.tx, "Цель X")
+            y = self._parse_coord_field(self.ty, "Цель Y")
+        except Exception as e:
+            self.status.setText(f"Ошибка known point: {e}")
+            return
+        self.known_points[name] = {"x_m": x, "y_m": y}
+        self._refresh_known_points_ui()
+        base = (self.web_url.text().strip() if hasattr(self, "web_url") else "").rstrip("/")
+        if base:
+            try:
+                req = urllib.request.Request(base + "/api/set_known_point", data=json.dumps({"name": name, "x_m": x, "y_m": y}).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
+                urllib.request.urlopen(req, timeout=0.4).read()
+            except Exception:
+                pass
+
+    def _apply_selected_known_point(self):
+        item = self.known_points_list.currentItem()
+        if not item:
+            return
+        name = item.text().split(" ")[0]
+        p = self.known_points.get(name)
+        if not p:
+            return
+        self.tx.setText(str(int(round(float(p.get("x_m", 0))))))
+        self.ty.setText(str(int(round(float(p.get("y_m", 0))))))
+
+    def _refresh_known_points_ui(self):
+        if not hasattr(self, "known_points_list"):
+            return
+        self.known_points_list.clear()
+        for name, p in sorted(self.known_points.items()):
+            self.known_points_list.addItem(f"{name} ({p.get('x_m',0):.0f}, {p.get('y_m',0):.0f})")
+
+    def _reset_runtime_data(self):
+        if QMessageBox.question(self, "Подтверждение", "Очистить все данные кроме баллистических таблиц?") != QMessageBox.Yes:
+            return
+        self.nfa_zones = []
+        self.known_points = {}
+        self._clear_mission_history()
+        self._refresh_nfa_list()
+        self._refresh_known_points_ui()
+        base = (self.web_url.text().strip() if hasattr(self, "web_url") else "").rstrip("/")
+        if base:
+            try:
+                req = urllib.request.Request(base + "/api/reset_runtime_data", data=b"{}", headers={"Content-Type": "application/json"}, method="POST")
+                urllib.request.urlopen(req, timeout=0.4).read()
+            except Exception:
+                pass
+
 
 def main():
     app = QApplication(sys.argv)
