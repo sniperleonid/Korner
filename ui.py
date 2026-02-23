@@ -1,4 +1,4 @@
-import os, sys, math, re, traceback, json
+import os, sys, math, re, traceback, json, socket, subprocess
 
 import requests
 import webbrowser
@@ -226,6 +226,80 @@ class MainWindow(QMainWindow):
         if not url.endswith("/"):
             url += "/"
         webbrowser.open(url)
+
+    def _server_ping(self) -> bool:
+        base = self.web_url.text().strip() if hasattr(self, "web_url") else ""
+        if not base:
+            return False
+        if not base.endswith("/"):
+            base += "/"
+        try:
+            data = requests.get(base + "api/ping", timeout=0.35).json()
+            return bool(data.get("ok"))
+        except Exception:
+            return False
+
+    def _server_start_clicked(self):
+        if self._server_ping():
+            self._server_update_status()
+            return
+
+        if getattr(self, "_server_process", None) and self._server_process.poll() is None:
+            self._server_update_status()
+            return
+
+        cmd = [sys.executable, "-m", "uvicorn", "map_server.app:app", "--host", "0.0.0.0", "--port", "8000"]
+        try:
+            self._server_process = subprocess.Popen(
+                cmd,
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка старта", f"Не удалось запустить map-server: {e}")
+            self._server_process = None
+        self._server_update_status()
+
+    def _server_stop_clicked(self):
+        p = getattr(self, "_server_process", None)
+        if p and p.poll() is None:
+            try:
+                p.terminate()
+                p.wait(timeout=2.0)
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+        self._server_process = None
+        self._server_update_status()
+
+    def _server_update_status(self):
+        online = self._server_ping()
+        if hasattr(self, "lbl_server_status"):
+            self.lbl_server_status.setText("online" if online else "offline")
+            self.lbl_server_status.setStyleSheet(
+                "font-weight:600;color:#65d46e;" if online else "font-weight:600;color:#ef6f6c;"
+            )
+        if hasattr(self, "btn_start_server"):
+            self.btn_start_server.setEnabled(not online)
+        if hasattr(self, "btn_stop_server"):
+            self.btn_stop_server.setEnabled(online)
+
+        if hasattr(self, "lbl_lan_hint"):
+            host = "127.0.0.1"
+            try:
+                host = socket.gethostbyname(socket.gethostname())
+            except Exception:
+                pass
+            self.lbl_lan_hint.setText(f"http://{host}:8000/" if online else "LAN: —")
+
+    def _server_autostart_once(self):
+        if self._server_ping():
+            self._server_update_status()
+            return
+        self._server_start_clicked()
 
     def _web_poll(self):
         # Read clicks from web-map and auto-fill coordinates
