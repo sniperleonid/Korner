@@ -1031,6 +1031,7 @@ class MainWindow(QMainWindow):
         self.known_points[name] = {"x_m": x, "y_m": y}
         self._refresh_known_points_ui()
         self._push_known_point_to_server(name, self.known_points[name])
+        self._save_state()
 
     def _apply_known_point_from_dialog(self):
         self._apply_selected_known_point(from_dialog=True)
@@ -1043,6 +1044,7 @@ class MainWindow(QMainWindow):
         if name in self.known_points:
             del self.known_points[name]
             self._refresh_known_points_ui()
+            self._save_state()
             base = (self.web_url.text().strip() if hasattr(self, "web_url") else "").rstrip("/")
             if base:
                 try:
@@ -1072,6 +1074,7 @@ class MainWindow(QMainWindow):
         self.nfa_zones.append({"x_m": x, "y_m": y, "radius_m": r})
         self._refresh_nfa_list()
         self._push_nfa_to_server()
+        self._save_state()
 
     def _remove_selected_nfa_zone(self):
         row = self.nfa_list.currentRow()
@@ -1079,6 +1082,7 @@ class MainWindow(QMainWindow):
             self.nfa_zones.pop(row)
             self._refresh_nfa_list()
             self._push_nfa_to_server()
+            self._save_state()
 
     def _refresh_nfa_list(self):
         self.nfa_list.clear()
