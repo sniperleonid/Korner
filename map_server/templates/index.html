@@ -23,7 +23,7 @@
   <div id="top">
     <div class="row">
       <input id="imgfile" type="file" accept="image/*" class="btn" />
-      <button id="mode" class="btn">Режим: КАЛИБРОВКА</button>
+      <button id="mode" class="btn">КАЛИБРОВКА</button>
       <span class="pill warn" id="cal">калибровка: нет</span>
       <input id="distm" value="1000" style="width:110px" title="Расстояние между P1 и P2, м" />
       <button id="clear" class="btn">Сброс</button>
@@ -83,8 +83,12 @@
   function mkIconBtn(label, icon, value){
     const b=document.createElement("button");
     b.className="btn";
-    b.style.padding="8px 10px";
-    b.innerHTML = `<span style="font-size:16px;line-height:1">${icon}</span>`;
+    b.style.padding="6px 8px";
+    b.style.display="flex";
+    b.style.flexDirection="column";
+    b.style.alignItems="center";
+    b.style.gap="3px";
+    b.innerHTML = `<span style="font-size:16px;line-height:1">${icon}</span><span style="font-size:11px;opacity:.9">${label}</span>`;
     b.title = label;
     b.dataset.value=value;
     return b;
@@ -212,6 +216,12 @@
     updateCalUIVisibility();
     lockBtn.style.display = (mode==="mission") ? "" : "none";
     coordsBtn.style.display = (mode==="mission") ? "" : "none";
+    if(mode!=="cal"){
+      clearGrid();
+      if(coordTip){ map.removeLayer(coordTip); coordTip=null; }
+    } else {
+      updateGrid();
+    }
   }
   setMode("cal");
   setDest("target");
@@ -356,6 +366,11 @@
       if(show && !onMap) l.addTo(map);
       if(!show && onMap) map.removeLayer(l);
     }
+    if(gridLayer){
+      const onMap = map.hasLayer(gridLayer);
+      if(show && !onMap) gridLayer.addTo(map);
+      if(!show && onMap) map.removeLayer(gridLayer);
+    }
   }
 
   function gridStep(){
@@ -447,6 +462,13 @@
     const mk=makeMarker(latlng,display,color,emoji);
     mk._dest = dest;
     mk.on("click", ()=>{ selectedDest=dest; });
+    mk.on("dblclick", async ()=>{
+      if(missionLocked) return;
+      map.removeLayer(mk);
+      markers.delete(dest);
+      if(selectedDest===dest) selectedDest=null;
+      await post("/api/delete_point",{dest});
+    });
 
     if(missionLocked) mk.dragging.disable();
 
@@ -543,8 +565,9 @@
       updateLine12(); updateGrid(); updateRuler();
       return;
     }
-    // mission: place marker + send
+    // mission: place marker + send (unless clicked on marker itself)
     if(!calOk){ alert("Сначала калибровка"); return; }
+    if(missionLocked){ return; }
     const dest=currentDest.startsWith("gun") ? currentDest : currentDest;
     await upsertPoint(dest, e.latlng);
     const xy=worldXY(e.latlng);
@@ -590,6 +613,38 @@
     });
   }
 
+  async function syncPointsFromServer(){
+    if(mode!=="mission") return;
+    const res = await getJson("/api/state");
+    if(!res || !res.ok || !res.points) return;
+    const serverPoints = res.points;
+    for(const [dest,p] of Object.entries(serverPoints)){
+      if(!p || typeof p.x_m!=="number" || typeof p.y_m!=="number") continue;
+      if(!calOk) continue;
+      // sync only existing map markers to avoid phantom placements without calibration context
+      if(!markers.has(dest)) continue;
+      const mk = markers.get(dest);
+      if(!mk || mk.dragging?._draggable?._moving) continue;
+      // reverse projection by local axis from p1/p2 and world origin via p0
+      const mpp = metersPerPixel();
+      if(!mpp || !p0 || !p1 || !p2) continue;
+      const X0=grid_to_meters(x0.value||"0");
+      const Y0=grid_to_meters(y0.value||"0");
+      const l0=localXY(p0);
+      const tx = (p.x_m - X0) + l0.x;
+      const ty = (p.y_m - Y0) + l0.y;
+      const dx=p2.lng-p1.lng, dy=p2.lat-p1.lat;
+      const Lpx=Math.hypot(dx,dy);
+      const ux=dx/Lpx, uy=dy/Lpx;
+      const px = tx / mpp;
+      const py = ty / mpp;
+      const wx = px*ux - py*uy;
+      const wy = px*uy + py*ux;
+      const latlng = L.latLng(p1.lat + wy, p1.lng + wx);
+      mk.setLatLng(latlng);
+    }
+  }
+
   function loadImage(file){
     const url=URL.createObjectURL(file);
     const img=new Image();
@@ -612,6 +667,7 @@
 
   updateCalUIVisibility();
   resetAll();
+  setInterval(syncPointsFromServer, 1000);
 </script>
 
 
