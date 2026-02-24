@@ -245,6 +245,9 @@ class MainWindow(QMainWindow):
 
         self.web_auto = QCheckBox("Автоподстановка кликов (dest) в поля калькулятора")
         self.web_auto.setChecked(True)
+        self.map_auto_sync = QCheckBox("Автообновление карты из программы")
+        self.map_auto_sync.setChecked(True)
+        self.btn_sync_map = QPushButton("Обновить информацию на карте")
 
         form.addRow("URL", self.web_url)
         form.addRow(self.btn_open_map)
@@ -252,6 +255,8 @@ class MainWindow(QMainWindow):
         form.addRow("Статус", self.lbl_server_status)
         form.addRow("Открыть с телефона", self.lbl_lan_hint)
         form.addRow(self.web_auto)
+        form.addRow(self.map_auto_sync)
+        form.addRow(self.btn_sync_map)
 
         lay.addWidget(box)
         lay.addStretch(1)
@@ -259,6 +264,7 @@ class MainWindow(QMainWindow):
         self.btn_open_map.clicked.connect(self._web_open)
         self.btn_start_server.clicked.connect(self._server_start_clicked)
         self.btn_stop_server.clicked.connect(self._server_stop_clicked)
+        self.btn_sync_map.clicked.connect(self._sync_map_now)
 
         # timer: poll clicks + status
         self._web_last_ts = 0.0
@@ -866,7 +872,7 @@ class MainWindow(QMainWindow):
                 req2 = urllib.request.Request(base + "api/gun_config", data=json.dumps({"gun_id": f"gun{idx}", "sector_mil": sector_mil, "min_range": min_r, "max_range": max_r}).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
                 urllib.request.urlopen(req2, timeout=0.15).read()
 
-            for dest, fx, fy in (("observer", self.ox, self.oy), ("drone", self.dx, self.dy)):
+            for dest, fx, fy in (("observer", self.ox, self.oy), ("drone", self.dx, self.dy), ("target", self.tx, self.ty)):
                 xv = (fx.text() or "").strip(); yv = (fy.text() or "").strip()
                 if not xv or not yv:
                     continue
@@ -874,6 +880,12 @@ class MainWindow(QMainWindow):
                 y = self._parse_coord_field(fy, f"{dest} Y")
                 req = urllib.request.Request(base + "api/set_point", data=json.dumps({"dest": dest, "x_m": x, "y_m": y, "label": dest}).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
                 urllib.request.urlopen(req, timeout=0.15).read()
+
+            req_kp = urllib.request.Request(base + "api/set_nfa_zones", data=json.dumps({"zones": self.nfa_zones}).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
+            urllib.request.urlopen(req_kp, timeout=0.2).read()
+            for name, p in self.known_points.items():
+                req = urllib.request.Request(base + "api/set_known_point", data=json.dumps({"name": name, "x_m": float(p.get("x_m", 0)), "y_m": float(p.get("y_m", 0)), "note": p.get("note", "")}).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
+                urllib.request.urlopen(req, timeout=0.2).read()
         except Exception:
             pass
 
@@ -898,7 +910,8 @@ class MainWindow(QMainWindow):
                 if not req_base.endswith("/"):
                     req_base += "/"
                 try:
-                    self._sync_local_points_to_server(req_base.rstrip("/"))
+                    if self.map_auto_sync.isChecked() if hasattr(self, "map_auto_sync") else True:
+                        self._sync_local_points_to_server(req_base.rstrip("/"))
                     click = http_get_json(req_base + "api/last_click", timeout=0.2)
                     state = http_get_json(req_base + "api/state", timeout=0.2)
                     if click is None and state is None:
@@ -957,6 +970,15 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, "web_auto") and self.web_auto.isChecked():
             self._web_apply_dest(dest, x, y)
+
+    def _sync_map_now(self):
+        base = self.web_url.text().strip() if hasattr(self, "web_url") else ""
+        if not base:
+            self.status.setText("Сначала укажите URL карты")
+            return
+        self._last_local_sync_ts = 0.0
+        self._sync_local_points_to_server(base)
+        self.status.setText("Данные отправлены на карту")
 
     def _sync_guns_with_server_state(self, state_payload: dict):
         points = state_payload.get("points", {}) if isinstance(state_payload, dict) else {}
@@ -1031,6 +1053,7 @@ class MainWindow(QMainWindow):
         self.known_points[name] = {"x_m": x, "y_m": y}
         self._refresh_known_points_ui()
         self._push_known_point_to_server(name, self.known_points[name])
+        self._save_state()
 
     def _apply_known_point_from_dialog(self):
         self._apply_selected_known_point(from_dialog=True)
@@ -1043,6 +1066,7 @@ class MainWindow(QMainWindow):
         if name in self.known_points:
             del self.known_points[name]
             self._refresh_known_points_ui()
+            self._save_state()
             base = (self.web_url.text().strip() if hasattr(self, "web_url") else "").rstrip("/")
             if base:
                 try:
@@ -1072,6 +1096,7 @@ class MainWindow(QMainWindow):
         self.nfa_zones.append({"x_m": x, "y_m": y, "radius_m": r})
         self._refresh_nfa_list()
         self._push_nfa_to_server()
+        self._save_state()
 
     def _remove_selected_nfa_zone(self):
         row = self.nfa_list.currentRow()
@@ -1079,6 +1104,7 @@ class MainWindow(QMainWindow):
             self.nfa_zones.pop(row)
             self._refresh_nfa_list()
             self._push_nfa_to_server()
+            self._save_state()
 
     def _refresh_nfa_list(self):
         self.nfa_list.clear()
